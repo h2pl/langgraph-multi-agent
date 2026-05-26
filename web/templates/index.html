@@ -1,0 +1,575 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🏘️ 桃源镇 - AI 小镇模拟</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, 'Microsoft YaHei', sans-serif;
+            background: linear-gradient(135deg, #0f0c29, #302b63, #24243e);
+            color: #e0e0e0;
+            min-height: 100vh;
+        }
+
+        .header {
+            text-align: center;
+            padding: 20px;
+            background: rgba(255,255,255,0.05);
+            backdrop-filter: blur(10px);
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+        }
+
+        .header h1 {
+            font-size: 28px;
+            background: linear-gradient(90deg, #f093fb, #f5576c, #fda085);
+            background-clip: text;
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .header .time-display {
+            font-size: 18px;
+            margin-top: 8px;
+            color: #a0a0ff;
+        }
+
+        .controls {
+            display: flex;
+            justify-content: center;
+            gap: 12px;
+            padding: 16px;
+        }
+
+        .controls button {
+            padding: 10px 24px;
+            border: none;
+            border-radius: 25px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+
+        .btn-step {
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            color: white;
+        }
+
+        .btn-auto {
+            background: linear-gradient(135deg, #f093fb, #f5576c);
+            color: white;
+        }
+
+        .btn-day {
+            background: linear-gradient(135deg, #fda085, #f6d365);
+            color: #333;
+        }
+
+        .btn-reset {
+            background: rgba(255,255,255,0.1);
+            color: #e0e0e0;
+            border: 1px solid rgba(255,255,255,0.2) !important;
+        }
+
+        .controls button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+        }
+
+        .controls button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .main-grid {
+            display: grid;
+            grid-template-columns: 300px 1fr 320px;
+            gap: 16px;
+            padding: 16px;
+            max-width: 1400px;
+            margin: 0 auto;
+            min-height: calc(100vh - 160px);
+        }
+
+        .panel {
+            background: rgba(255,255,255,0.05);
+            backdrop-filter: blur(10px);
+            border-radius: 16px;
+            border: 1px solid rgba(255,255,255,0.1);
+            overflow: hidden;
+        }
+
+        .panel-title {
+            padding: 12px 16px;
+            font-size: 15px;
+            font-weight: 600;
+            background: rgba(255,255,255,0.05);
+            border-bottom: 1px solid rgba(255,255,255,0.08);
+        }
+
+        .panel-body {
+            padding: 12px;
+            overflow-y: auto;
+            max-height: calc(100vh - 240px);
+        }
+
+        /* 居民卡片 */
+        .resident-card {
+            padding: 12px;
+            margin-bottom: 10px;
+            border-radius: 12px;
+            background: rgba(255,255,255,0.05);
+            border: 1px solid rgba(255,255,255,0.08);
+            transition: all 0.3s;
+        }
+
+        .resident-card:hover {
+            background: rgba(255,255,255,0.1);
+        }
+
+        .resident-name {
+            font-weight: 700;
+            font-size: 15px;
+            margin-bottom: 4px;
+        }
+
+        .resident-info {
+            font-size: 12px;
+            color: #a0a0a0;
+            line-height: 1.6;
+        }
+
+        .resident-emotion {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-size: 11px;
+            background: rgba(102, 126, 234, 0.3);
+            margin-top: 4px;
+        }
+
+        /* 地图 */
+        .town-map {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 12px;
+            padding: 12px;
+        }
+
+        .location-card {
+            padding: 14px;
+            border-radius: 12px;
+            background: rgba(255,255,255,0.05);
+            border: 1px solid rgba(255,255,255,0.08);
+            min-height: 100px;
+            transition: all 0.3s;
+        }
+
+        .location-card.has-people {
+            border-color: rgba(240, 147, 251, 0.4);
+            background: rgba(240, 147, 251, 0.08);
+        }
+
+        .location-name {
+            font-weight: 600;
+            font-size: 14px;
+            margin-bottom: 8px;
+        }
+
+        .location-icon {
+            font-size: 24px;
+            margin-bottom: 6px;
+        }
+
+        .location-occupants {
+            font-size: 12px;
+            color: #c0c0c0;
+        }
+
+        .occupant-tag {
+            display: inline-block;
+            padding: 2px 8px;
+            margin: 2px;
+            border-radius: 8px;
+            font-size: 11px;
+            background: rgba(245, 87, 108, 0.3);
+        }
+
+        /* 事件日志 */
+        .event-item {
+            padding: 8px 12px;
+            margin-bottom: 6px;
+            border-radius: 8px;
+            font-size: 13px;
+            line-height: 1.5;
+            background: rgba(255,255,255,0.03);
+            border-left: 3px solid #667eea;
+            animation: fadeIn 0.5s ease;
+        }
+
+        .event-item.conversation {
+            border-left-color: #f093fb;
+            background: rgba(240, 147, 251, 0.08);
+        }
+
+        .event-item.reflection {
+            border-left-color: #fda085;
+            background: rgba(253, 160, 133, 0.08);
+        }
+
+        .conversation-content {
+            padding: 10px;
+            margin-top: 8px;
+            border-radius: 8px;
+            background: rgba(0,0,0,0.2);
+            font-size: 13px;
+            line-height: 1.8;
+            white-space: pre-wrap;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .loading {
+            text-align: center;
+            padding: 20px;
+            color: #a0a0ff;
+        }
+
+        .loading::after {
+            content: '';
+            animation: dots 1.5s infinite;
+        }
+
+        @keyframes dots {
+            0% { content: '.'; }
+            33% { content: '..'; }
+            66% { content: '...'; }
+        }
+
+        @media (max-width: 1024px) {
+            .main-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🏘️ 桃源镇 · AI 小镇模拟</h1>
+        <div class="time-display" id="timeDisplay">加载中...</div>
+    </div>
+
+    <div class="controls">
+        <button class="btn-step" onclick="doStep()" id="btnStep">⏭️ 下一步</button>
+        <button class="btn-auto" onclick="autoRun()" id="btnAuto">▶️ 自动运行</button>
+        <button class="btn-day" onclick="runDay()" id="btnDay">🌅 运行一天</button>
+        <button class="btn-reset" onclick="resetSim()">🔄 重置</button>
+    </div>
+
+    <div class="main-grid">
+        <!-- 左侧：居民列表 -->
+        <div class="panel">
+            <div class="panel-title">👥 居民</div>
+            <div class="panel-body" id="residentList">
+                <div class="loading">加载中</div>
+            </div>
+        </div>
+
+        <!-- 中间：小镇地图 -->
+        <div class="panel">
+            <div class="panel-title">🗺️ 桃源镇地图</div>
+            <div class="panel-body">
+                <div class="town-map" id="townMap">
+                    <div class="loading">加载中</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 右侧：事件日志 -->
+        <div class="panel">
+            <div class="panel-title">📜 事件日志</div>
+            <div class="panel-body" id="eventLog">
+                <div style="color:#666; text-align:center; padding:20px;">
+                    点击"下一步"开始模拟
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const LOCATION_ICONS = {
+            '老王面馆': '🍜',
+            '小镇广场': '🏛️',
+            '卫生所': '🏥',
+            '桃源小学': '🏫',
+            '赵大姐超市': '🏪',
+            '镇公园': '🌳',
+            '老王的家': '🏠',
+            '小李的家': '💻',
+            '张医生的家': '🏠',
+            '陈老师的家': '🏠',
+            '赵大姐的家': '🏠',
+        };
+
+        const RESIDENT_COLORS = {
+            '老王': '#f5576c',
+            '小李': '#667eea',
+            '张医生': '#43e97b',
+            '陈老师': '#fa709a',
+            '赵大姐': '#fda085',
+        };
+
+        let isRunning = false;
+        let ws = null;
+
+        // 初始化 WebSocket
+        function initWebSocket() {
+            const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            ws = new WebSocket(`${protocol}//${location.host}/ws`);
+
+            ws.onmessage = (event) => {
+                const msg = JSON.parse(event.data);
+                if (msg.type === 'step_update') {
+                    updateUI(msg.data);
+                } else if (msg.type === 'status') {
+                    renderInitialStatus(msg.data);
+                }
+            };
+
+            ws.onopen = () => {
+                ws.send(JSON.stringify({ action: 'status' }));
+            };
+
+            ws.onclose = () => {
+                setTimeout(initWebSocket, 3000);
+            };
+        }
+
+        // 渲染初始状态
+        function renderInitialStatus(data) {
+            document.getElementById('timeDisplay').textContent =
+                `${data.clock.time_str} · ${data.clock.period}`;
+            renderResidents(data.residents);
+            renderMap(data.town.locations);
+        }
+
+        // 更新 UI
+        function updateUI(data) {
+            document.getElementById('timeDisplay').textContent = data.time;
+
+            if (data.agent_states) {
+                renderResidents(data.agent_states);
+            }
+            if (data.location_states) {
+                updateMap(data.location_states);
+            }
+            if (data.events) {
+                appendEvents(data.events);
+            }
+            if (data.conversations && data.conversations.length > 0) {
+                appendConversations(data.conversations);
+            }
+        }
+
+        // 渲染居民列表
+        function renderResidents(residents) {
+            const container = document.getElementById('residentList');
+            container.innerHTML = '';
+
+            for (const [name, info] of Object.entries(residents)) {
+                const color = RESIDENT_COLORS[name] || '#667eea';
+                const card = document.createElement('div');
+                card.className = 'resident-card';
+                card.innerHTML = `
+                    <div class="resident-name" style="color:${color}">${name}</div>
+                    <div class="resident-info">
+                        👤 ${info.occupation || info.age + '岁'}<br>
+                        📍 ${info.current_location}<br>
+                        🎯 ${info.current_activity}
+                    </div>
+                    <span class="resident-emotion">${info.current_emotion || '平静'}</span>
+                `;
+                container.appendChild(card);
+            }
+        }
+
+        // 渲染地图
+        function renderMap(locations) {
+            const container = document.getElementById('townMap');
+            container.innerHTML = '';
+
+            for (const [name, info] of Object.entries(locations)) {
+                const icon = LOCATION_ICONS[name] || '📍';
+                const occupants = info.occupants || [];
+                const card = document.createElement('div');
+                card.className = 'location-card' + (occupants.length > 0 ? ' has-people' : '');
+                card.id = `loc-${name}`;
+
+                const occupantTags = occupants.map(o => {
+                    const color = RESIDENT_COLORS[o] || '#667eea';
+                    return `<span class="occupant-tag" style="background:${color}33; color:${color}">${o}</span>`;
+                }).join('');
+
+                card.innerHTML = `
+                    <div class="location-icon">${icon}</div>
+                    <div class="location-name">${name}</div>
+                    <div class="location-occupants">
+                        ${occupantTags || '<span style="color:#555">空</span>'}
+                    </div>
+                `;
+                container.appendChild(card);
+            }
+        }
+
+        // 更新地图（仅更新人员位置）
+        function updateMap(locationStates) {
+            for (const [name, occupants] of Object.entries(locationStates)) {
+                const card = document.getElementById(`loc-${name}`);
+                if (!card) continue;
+
+                card.className = 'location-card' + (occupants.length > 0 ? ' has-people' : '');
+                const occDiv = card.querySelector('.location-occupants');
+                if (occDiv) {
+                    const tags = occupants.map(o => {
+                        const color = RESIDENT_COLORS[o] || '#667eea';
+                        return `<span class="occupant-tag" style="background:${color}33; color:${color}">${o}</span>`;
+                    }).join('');
+                    occDiv.innerHTML = tags || '<span style="color:#555">空</span>';
+                }
+            }
+        }
+
+        // 添加事件
+        function appendEvents(events) {
+            const container = document.getElementById('eventLog');
+            // 移除初始提示
+            const placeholder = container.querySelector('div[style]');
+            if (placeholder) placeholder.remove();
+
+            for (const event of events) {
+                const div = document.createElement('div');
+                let cls = 'event-item';
+                if (event.includes('[对话]')) cls += ' conversation';
+                if (event.includes('[反思]')) cls += ' reflection';
+                div.className = cls;
+                div.textContent = event;
+                container.prepend(div);
+            }
+
+            // 限制最大条数
+            while (container.children.length > 100) {
+                container.removeChild(container.lastChild);
+            }
+        }
+
+        // 添加对话
+        function appendConversations(conversations) {
+            const container = document.getElementById('eventLog');
+
+            for (const conv of conversations) {
+                const div = document.createElement('div');
+                div.className = 'event-item conversation';
+                div.innerHTML = `
+                    <strong>💬 ${conv.participants.join(' & ')} 在${conv.location}的对话</strong>
+                    <div class="conversation-content">${conv.content}</div>
+                `;
+                container.prepend(div);
+            }
+        }
+
+        // 控制按钮
+        async function doStep() {
+            setButtonsDisabled(true);
+            try {
+                const res = await fetch('/api/step', { method: 'POST' });
+                const data = await res.json();
+                updateUI(data.state);
+            } catch (e) {
+                console.error(e);
+            }
+            setButtonsDisabled(false);
+        }
+
+        async function autoRun() {
+            if (isRunning) {
+                isRunning = false;
+                document.getElementById('btnAuto').textContent = '▶️ 自动运行';
+                return;
+            }
+
+            isRunning = true;
+            document.getElementById('btnAuto').textContent = '⏸️ 暂停';
+
+            while (isRunning) {
+                try {
+                    const res = await fetch('/api/step', { method: 'POST' });
+                    const data = await res.json();
+                    updateUI(data.state);
+                    await new Promise(r => setTimeout(r, 2000));
+                } catch (e) {
+                    console.error(e);
+                    isRunning = false;
+                }
+            }
+
+            document.getElementById('btnAuto').textContent = '▶️ 自动运行';
+        }
+
+        async function runDay() {
+            setButtonsDisabled(true);
+            document.getElementById('btnDay').textContent = '🔄 模拟中...';
+
+            try {
+                const res = await fetch('/api/run_day', { method: 'POST' });
+                const data = await res.json();
+                appendEvents(data.events || []);
+                appendConversations(data.conversations || []);
+
+                // 刷新状态
+                const statusRes = await fetch('/api/status');
+                const status = await statusRes.json();
+                renderInitialStatus(status);
+            } catch (e) {
+                console.error(e);
+            }
+
+            document.getElementById('btnDay').textContent = '🌅 运行一天';
+            setButtonsDisabled(false);
+        }
+
+        async function resetSim() {
+            await fetch('/api/reset', { method: 'POST' });
+            document.getElementById('eventLog').innerHTML =
+                '<div style="color:#666; text-align:center; padding:20px;">点击"下一步"开始模拟</div>';
+
+            const res = await fetch('/api/status');
+            const data = await res.json();
+            renderInitialStatus(data);
+        }
+
+        function setButtonsDisabled(disabled) {
+            document.getElementById('btnStep').disabled = disabled;
+            document.getElementById('btnDay').disabled = disabled;
+        }
+
+        // 初始化
+        window.addEventListener('load', async () => {
+            try {
+                const res = await fetch('/api/status');
+                const data = await res.json();
+                renderInitialStatus(data);
+            } catch (e) {
+                console.error('Failed to load initial status:', e);
+            }
+            initWebSocket();
+        });
+    </script>
+</body>
+</html>
