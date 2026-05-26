@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
+from difflib import SequenceMatcher
 from typing import Optional
 
 
@@ -30,19 +31,30 @@ class MemoryItem:
         return decay_factor ** (elapsed / 60)  # 每分钟衰减
 
     def relevance_score(self, query: str) -> float:
-        """简单的关键词相关性评分"""
-        query_chars = set(query)
-        content_chars = set(self.content)
-        overlap = len(query_chars & content_chars)
-        total = len(query_chars | content_chars)
-        return overlap / total if total > 0 else 0
+        """基于序列匹配的文本相似度评分（比字符集合匹配准确得多）"""
+        if not query or not self.content:
+            return 0.0
+        # SequenceMatcher: 找出两段文本的最长公共子序列比率
+        seq_score = SequenceMatcher(None, self.content, query).ratio()
+        # 关键词重叠: 按词粒度计算 Jaccard 相似度
+        query_words = set(query)
+        content_words = set(self.content)
+        overlap = len(query_words & content_words)
+        total = len(query_words | content_words)
+        word_score = overlap / total if total > 0 else 0
+        # 两种方式加权融合
+        return 0.6 * seq_score + 0.4 * word_score
 
     def total_score(self, query: str = "") -> float:
-        """综合得分 = 重要性 + 时近性 + 相关性"""
+        """综合得分 = 重要性(α) + 时近性(β) + 相关性(γ)
+
+        权重参考斯坦福论文：三个维度同等重要，各占约 1/3。
+        """
+        alpha, beta, gamma = 1.0, 1.0, 1.0
         importance_w = self.importance / 10.0
         recency_w = self.recency_score
         relevance_w = self.relevance_score(query) if query else 0
-        return importance_w + recency_w + relevance_w
+        return alpha * importance_w + beta * recency_w + gamma * relevance_w
 
     def to_dict(self) -> dict:
         return {

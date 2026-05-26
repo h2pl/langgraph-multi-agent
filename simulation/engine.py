@@ -1,17 +1,23 @@
-"""LangGraph 模拟引擎 - 小镇生活的核心循环
+"""LangGraph 模拟引擎 - Supervisor + Sub-graph 架构
 
-工作流（StateGraph）:
-  perceive -> plan -> act -> [check_day_end] -> perceive (继续) / reflect (结束一天)
-                                                              |
-                                                              v
-                                                             END
+架构设计：
+  Supervisor Graph（全局编排）:
+    dispatch_agents → interact → advance_time → [check_day_end]
+                                                   ├─ continue → dispatch_agents
+                                                   └─ end_day  → reflect → END
+
+  每个居民拥有独立的 Sub-graph（ResidentAgent）:
+    perceive → plan → act → END
+
+  Supervisor 负责：编排时间、分发任务、协调交互
+  Sub-graph 负责：独立感知、规划、行动
 """
 
 from __future__ import annotations
 
-import json
 import random
-from typing import TypedDict, Annotated
+from typing import TypedDict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from langgraph.graph import StateGraph, END
 
@@ -19,8 +25,8 @@ from town.environment import Town
 from town.clock import SimClock
 from agents.resident import Resident
 from agents.profiles import RESIDENT_PROFILES
+from simulation.resident_graph import ResidentAgent
 from simulation.interactions import (
-    generate_plan,
     generate_conversation,
     generate_reflection,
     rate_importance,
@@ -28,10 +34,10 @@ from simulation.interactions import (
 from config import config
 
 
-# ─── State 定义 ───────────────────────────────────────────────
+# ─── Supervisor State ────────────────────────────────────────
 
 class SimulationState(TypedDict):
-    """模拟状态，在 LangGraph 节点之间传递"""
+    """Supervisor 全局状态"""
     step: int
     day: int
     hour: int
@@ -45,140 +51,129 @@ class SimulationState(TypedDict):
     should_end_day: bool
 
 
-# ─── 模拟引擎 ────────────────────────────────────────────────
+# ─── Supervisor 模拟引擎 ─────────────────────────────────────
 
 class TownSimulation:
-    """小镇模拟引擎"""
+    """Supervisor 模式的小镇模拟引擎
+
+    架构说明：
+    - 每个居民是一个独立的 ResidentAgent，拥有自己的 Sub-graph
+    - Supervisor Graph 负责全局编排（时间、交互、反思）
+    - dispatch_agents 节点并行调用所有居民的 Sub-graph
+    """
 
     def __init__(self):
         self.town = Town()
         self.clock = SimClock()
         self.residents: dict[str, Resident] = {}
+        self.agents: dict[str, ResidentAgent] = {}  # 每个居民的独立 Agent
         self.graph = None
-        self.all_events: list[dict] = []  # 所有历史事件
+        self.all_events: list[dict] = []
 
         self._init_residents()
-        self._build_graph()
+        self._build_supervisor_graph()
 
     def _init_residents(self) -> None:
-        """初始化所有居民"""
+        """初始化居民和对应的独立 Agent"""
         for profile in RESIDENT_PROFILES:
             resident = Resident.from_profile(profile)
             self.residents[resident.name] = resident
-            # 将居民放到初始位置
             self.town.move_agent(resident.name, "", resident.home)
 
-    def _build_graph(self) -> None:
-        """构建 LangGraph 工作流"""
+            # 为每个居民创建独立的 Sub-graph Agent
+            self.agents[resident.name] = ResidentAgent(resident, self.town)
+
+    def _build_supervisor_graph(self) -> None:
+        """构建 Supervisor Graph
+
+        Supervisor 工作流:
+          dispatch_agents → interact → advance_time
+               ↑                          │
+               │      (day not ended)      │
+               └───────────────────────────┤
+                                           │ (day ended)
+                                           ↓
+                                        reflect → END
+        """
         graph = StateGraph(SimulationState)
 
-        # 添加节点
-        graph.add_node("perceive", self._perceive_node)
-        graph.add_node("plan", self._plan_node)
-        graph.add_node("act", self._act_node)
+        # Supervisor 节点
+        graph.add_node("dispatch_agents", self._dispatch_agents_node)
+        graph.add_node("interact", self._interact_node)
+        graph.add_node("advance_time", self._advance_time_node)
         graph.add_node("reflect", self._reflect_node)
 
-        # 设置入口
-        graph.set_entry_point("perceive")
-
-        # 添加边
-        graph.add_edge("perceive", "plan")
-        graph.add_edge("plan", "act")
+        # 编排流程
+        graph.set_entry_point("dispatch_agents")
+        graph.add_edge("dispatch_agents", "interact")
+        graph.add_edge("interact", "advance_time")
         graph.add_conditional_edges(
-            "act",
+            "advance_time",
             self._should_end_day,
             {
-                "continue": "perceive",
-                "reflect": "reflect",
+                "continue": "dispatch_agents",
+                "end_day": "reflect",
             },
         )
         graph.add_edge("reflect", END)
 
         self.graph = graph.compile()
 
-    # ─── LangGraph 节点 ──────────────────────────────────────
+    # ─── Supervisor 节点 ─────────────────────────────────────
 
-    def _perceive_node(self, state: SimulationState) -> dict:
-        """感知节点：每个居民观察周围环境"""
-        events = []
+    def _dispatch_agents_node(self, state: SimulationState) -> dict:
+        """Supervisor 核心：并行调度所有居民的独立 Sub-graph
 
-        for name, resident in self.residents.items():
-            location = resident.current_location
-            nearby = self.town.get_nearby_agents(name, location)
-            loc_desc = self.town.describe_location(location)
+        每个 ResidentAgent 的 Sub-graph 会独立执行:
+          perceive → plan → act
+        Supervisor 收集所有结果并合并。
+        """
+        all_events = []
+        location_options = self.town.get_location_names()
 
-            # 构造观察
-            if nearby:
-                obs = f"在{location}，看到了{', '.join(nearby)}。{loc_desc}"
-            else:
-                obs = f"在{location}，周围没有其他人。环境: {loc_desc}"
+        # 并行运行所有居民的 Sub-graph
+        with ThreadPoolExecutor(max_workers=len(self.agents)) as executor:
+            futures = {
+                executor.submit(
+                    agent.run,
+                    self.clock.time_str,
+                    self.clock.period,
+                    location_options,
+                ): name
+                for name, agent in self.agents.items()
+            }
 
-            importance = min(3.0 + len(nearby) * 1.5, 8.0)
-            resident.memory.add_observation(obs, importance, self.clock.time_str)
-            events.append(f"[感知] {name}: {obs}")
+            for future in as_completed(futures):
+                agent_name = futures[future]
+                try:
+                    result = future.result()
+                    all_events.extend(result.get("events", []))
+                except Exception as e:
+                    all_events.append(f"[错误] {agent_name} 执行失败: {e}")
 
-        return {"events": events}
+        return {
+            "events": state["events"] + all_events,
+            "day_log": state["day_log"] + all_events,
+            "agent_states": {n: r.to_dict() for n, r in self.residents.items()},
+            "location_states": {
+                loc: self.town.get_agents_at(loc)
+                for loc in self.town.get_location_names()
+            },
+        }
 
-    def _plan_node(self, state: SimulationState) -> dict:
-        """计划节点：每个居民决定下一步行动"""
-        events = []
-        all_locations = self.town.get_location_names()
+    def _interact_node(self, state: SimulationState) -> dict:
+        """Supervisor 交互节点：处理同一地点居民的对话
 
-        for name, resident in self.residents.items():
-            plan = generate_plan(
-                resident,
-                self.clock.time_str,
-                self.clock.period,
-                all_locations,
-            )
-
-            location = plan.get("location", resident.current_location)
-            activity = plan.get("activity", "闲逛")
-            emotion = plan.get("emotion", "平静")
-
-            # 验证地点
-            if location not in all_locations:
-                location = resident.current_location
-
-            resident.current_plan = f"去{location}{activity}"
-            events.append(f"[计划] {name}: 打算去{location}{activity}（心情: {emotion}）")
-
-            # 保存计划到记忆
-            resident.memory.add_plan(
-                f"计划: 去{location}{activity}", self.clock.time_str
-            )
-
-        return {"events": state["events"] + events}
-
-    def _act_node(self, state: SimulationState) -> dict:
-        """行动节点：执行计划，处理交互"""
+        只有 Supervisor 知道全局位置信息，
+        所以由 Supervisor 负责协调居民之间的交互。
+        """
         events = []
         conversations = []
 
-        # 1. 执行移动和活动
-        for name, resident in self.residents.items():
-            plan = resident.current_plan
-            # 从计划中提取目标地点
-            for loc_name in self.town.get_location_names():
-                if loc_name in plan:
-                    old_loc = resident.current_location
-                    if old_loc != loc_name:
-                        self.town.move_agent(name, old_loc, loc_name)
-                        resident.current_location = loc_name
-                        events.append(f"[移动] {name}: {old_loc} → {loc_name}")
-                    break
-
-            # 更新活动和情绪
-            if "activity" in plan:
-                resident.current_activity = plan
-            events.append(f"[行动] {name}: {resident.status_summary}")
-
-        # 2. 处理同一地点的居民交互
         interaction_pairs = set()
         for loc_name in self.town.get_location_names():
             agents_here = self.town.get_agents_at(loc_name)
             if len(agents_here) >= 2:
-                # 随机选择一对进行对话（避免太多 LLM 调用）
                 pair = tuple(sorted(random.sample(agents_here, 2)))
                 if pair not in interaction_pairs:
                     interaction_pairs.add(pair)
@@ -199,7 +194,7 @@ class TownSimulation:
                         "content": conversation,
                     })
 
-                    # 将对话加入双方记忆
+                    # 写入双方记忆
                     conv_summary = f"在{loc_name}和{a2.name}聊了天"
                     importance = rate_importance(conv_summary, a1)
                     a1.memory.add_observation(
@@ -215,11 +210,18 @@ class TownSimulation:
 
                     events.append(f"[对话] {pair[0]}和{pair[1]}在{loc_name}聊天")
 
-        # 3. 推进时间
+        return {
+            "events": state["events"] + events,
+            "day_log": state["day_log"] + events,
+            "conversations": state["conversations"] + conversations,
+        }
+
+    def _advance_time_node(self, state: SimulationState) -> dict:
+        """Supervisor 时间节点：推进模拟时钟"""
         self.clock.tick()
 
-        # 记录事件
-        for event in events:
+        # 记录事件到小镇日志
+        for event in state["events"]:
             self.town.add_event(self.clock.time_str, event)
 
         return {
@@ -228,9 +230,6 @@ class TownSimulation:
             "hour": self.clock.hour,
             "time_str": self.clock.time_str,
             "period": self.clock.period,
-            "events": state["events"] + events,
-            "day_log": state["day_log"] + events,
-            "conversations": state["conversations"] + conversations,
             "should_end_day": self.clock.is_day_end,
             "agent_states": {n: r.to_dict() for n, r in self.residents.items()},
             "location_states": {
@@ -240,17 +239,32 @@ class TownSimulation:
         }
 
     def _reflect_node(self, state: SimulationState) -> dict:
-        """反思节点：一天结束时，居民反思当天的经历"""
+        """Supervisor 反思节点：一天结束，协调所有居民反思"""
         events = []
 
-        for name, resident in self.residents.items():
-            if resident.memory.should_reflect(config.REFLECTION_THRESHOLD):
-                reflection = generate_reflection(resident, self.clock.time_str)
-                importance = rate_importance(reflection, resident)
-                resident.memory.add_reflection(reflection, importance, self.clock.time_str)
-                events.append(f"[反思] {name}: {reflection}")
+        # 并行执行反思
+        with ThreadPoolExecutor(max_workers=len(self.residents)) as executor:
+            futures = {}
+            for name, resident in self.residents.items():
+                if resident.memory.should_reflect(config.REFLECTION_THRESHOLD):
+                    futures[executor.submit(
+                        generate_reflection, resident, self.clock.time_str
+                    )] = (name, resident)
 
-            # 回家
+            for future in as_completed(futures):
+                name, resident = futures[future]
+                try:
+                    reflection = future.result()
+                    importance = rate_importance(reflection, resident)
+                    resident.memory.add_reflection(
+                        reflection, importance, self.clock.time_str
+                    )
+                    events.append(f"[反思] {name}: {reflection}")
+                except Exception as e:
+                    events.append(f"[错误] {name} 反思失败: {e}")
+
+        # 所有居民回家睡觉
+        for name, resident in self.residents.items():
             old_loc = resident.current_location
             if old_loc != resident.home:
                 self.town.move_agent(name, old_loc, resident.home)
@@ -267,14 +281,14 @@ class TownSimulation:
     # ─── 条件路由 ─────────────────────────────────────────────
 
     def _should_end_day(self, state: SimulationState) -> str:
-        """判断是否结束当天"""
+        """Supervisor 判断是否结束当天"""
         if state.get("should_end_day", False):
-            return "reflect"
+            return "end_day"
         if state["step"] >= config.MAX_STEPS_PER_DAY:
-            return "reflect"
+            return "end_day"
         return "continue"
 
-    # ─── 公共接口 ─────────────────────────────────────────────
+    # ─── 公共接口（保持与 Web 层兼容）───────────────────────────
 
     def get_initial_state(self) -> SimulationState:
         """获取初始状态"""
@@ -300,7 +314,6 @@ class TownSimulation:
         initial_state = self.get_initial_state()
         final_state = self.graph.invoke(initial_state)
 
-        # 保存历史
         self.all_events.extend(
             {"day": self.clock.day, "event": e} for e in final_state["day_log"]
         )
@@ -310,12 +323,11 @@ class TownSimulation:
     def run_step(self) -> dict:
         """运行单步（用于 Web 实时展示）"""
         state = self.get_initial_state()
-        state["step"] = 0
 
-        # 手动执行一个 perceive -> plan -> act 周期
-        state = {**state, **self._perceive_node(state)}
-        state = {**state, **self._plan_node(state)}
-        state = {**state, **self._act_node(state)}
+        # 单步：dispatch → interact → advance_time
+        state = {**state, **self._dispatch_agents_node(state)}
+        state = {**state, **self._interact_node(state)}
+        state = {**state, **self._advance_time_node(state)}
 
         return state
 
