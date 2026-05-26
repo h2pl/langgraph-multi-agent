@@ -66,12 +66,59 @@ class MemoryItem:
 
 
 class MemoryStream:
-    """记忆流 - 管理一个 Agent 的所有记忆"""
+    """记忆流 - 管理一个 Agent 的所有记忆
 
-    def __init__(self, max_short_term: int = 20):
+    支持两种检索模式（自动选择）：
+    1. 向量语义检索 — Chroma + sentence-transformers（需安装依赖）
+    2. 文本匹配检索 — SequenceMatcher（零依赖回退方案）
+    """
+
+    def __init__(self, owner_name: str = "", max_short_term: int = 20):
+        self.owner_name = owner_name
         self.memories: list[MemoryItem] = []
         self.max_short_term = max_short_term
         self._observation_count_since_reflection = 0
+        self._mem_counter = 0  # 用于生成唯一 ID
+
+        # 尝试初始化向量存储
+        self._collection = None
+        self._init_vector_store()
+
+    def _init_vector_store(self) -> None:
+        """初始化 Chroma 向量存储（失败则静默回退）"""
+        try:
+            from agents.vector_store import is_available, get_collection
+            if is_available() and self.owner_name:
+                self._collection = get_collection(self.owner_name)
+        except Exception:
+            self._collection = None
+
+    @property
+    def use_vector(self) -> bool:
+        """是否使用向量检索"""
+        return self._collection is not None
+
+    def _next_id(self) -> str:
+        """生成唯一记忆 ID"""
+        self._mem_counter += 1
+        return f"{self.owner_name}_{self._mem_counter}"
+
+    def _add_to_vector_store(self, mem: MemoryItem) -> None:
+        """将记忆同步写入向量数据库"""
+        if not self._collection:
+            return
+        try:
+            self._collection.add(
+                documents=[mem.content],
+                metadatas=[{
+                    "type": mem.memory_type,
+                    "importance": str(mem.importance),
+                    "created_at": mem.created_at,
+                }],
+                ids=[self._next_id()],
+            )
+        except Exception:
+            pass  # 向量写入失败不影响主流程
 
     def add_observation(self, content: str, importance: float, time_str: str) -> None:
         """添加观察记忆"""
@@ -82,6 +129,7 @@ class MemoryStream:
             created_at=time_str,
         )
         self.memories.append(mem)
+        self._add_to_vector_store(mem)
         self._observation_count_since_reflection += 1
 
     def add_reflection(self, content: str, importance: float, time_str: str) -> None:
@@ -89,10 +137,11 @@ class MemoryStream:
         mem = MemoryItem(
             content=content,
             memory_type="reflection",
-            importance=max(importance, 7.0),  # 反思至少 7 分重要性
+            importance=max(importance, 7.0),
             created_at=time_str,
         )
         self.memories.append(mem)
+        self._add_to_vector_store(mem)
         self._observation_count_since_reflection = 0
 
     def add_plan(self, content: str, time_str: str) -> None:
@@ -104,22 +153,77 @@ class MemoryStream:
             created_at=time_str,
         )
         self.memories.append(mem)
+        self._add_to_vector_store(mem)
 
     def should_reflect(self, threshold: int = 5) -> bool:
         """是否应该触发反思"""
         return self._observation_count_since_reflection >= threshold
 
     def retrieve(self, query: str = "", top_k: int = 10) -> list[MemoryItem]:
-        """检索最相关的记忆"""
-        for mem in self.memories:
-            mem.last_accessed = mem.last_accessed  # 保持原值用于衰减
+        """检索最相关的记忆
 
+        向量模式：用 Chroma 语义检索获取 relevance，再结合 importance + recency 重排
+        回退模式：用 SequenceMatcher 文本匹配
+        """
+        if not self.memories:
+            return []
+
+        if self.use_vector and query:
+            return self._retrieve_vector(query, top_k)
+        return self._retrieve_text(query, top_k)
+
+    def _retrieve_vector(self, query: str, top_k: int) -> list[MemoryItem]:
+        """向量语义检索（Chroma）"""
+        try:
+            # 从 Chroma 检索语义相关的记忆（取多一些用于重排）
+            n_candidates = min(top_k * 3, len(self.memories))
+            results = self._collection.query(
+                query_texts=[query],
+                n_results=n_candidates,
+            )
+
+            if not results or not results["documents"] or not results["documents"][0]:
+                return self._retrieve_text(query, top_k)
+
+            # Chroma 返回的距离越小越相似，转为 0~1 的相似度分数
+            distances = results["distances"][0] if results.get("distances") else []
+            documents = results["documents"][0]
+
+            # 建立 content -> vector_score 的映射
+            vector_scores = {}
+            for doc, dist in zip(documents, distances):
+                # Chroma L2 距离转相似度: similarity = 1 / (1 + distance)
+                vector_scores[doc] = 1.0 / (1.0 + dist)
+
+            # 对内存中的记忆重排：综合 向量相似度 + 重要性 + 时近性
+            scored_memories = []
+            for mem in self.memories:
+                vec_score = vector_scores.get(mem.content, 0.0)
+                importance_score = mem.importance / 10.0
+                recency = mem.recency_score
+                # 向量相似度权重更高（这是语义检索的核心优势）
+                total = 1.5 * vec_score + 1.0 * importance_score + 1.0 * recency
+                scored_memories.append((total, mem))
+
+            scored_memories.sort(key=lambda x: x[0], reverse=True)
+
+            # 标记被访问
+            result = [mem for _, mem in scored_memories[:top_k]]
+            for mem in result:
+                mem.last_accessed = time.time()
+            return result
+
+        except Exception:
+            # 向量检索失败，回退到文本匹配
+            return self._retrieve_text(query, top_k)
+
+    def _retrieve_text(self, query: str, top_k: int) -> list[MemoryItem]:
+        """文本匹配检索（回退方案）"""
         scored = sorted(
             self.memories,
             key=lambda m: m.total_score(query),
             reverse=True,
         )
-        # 标记被访问
         for mem in scored[:top_k]:
             mem.last_accessed = time.time()
         return scored[:top_k]
@@ -155,5 +259,6 @@ class MemoryStream:
             "total_memories": len(self.memories),
             "observations": len([m for m in self.memories if m.memory_type == "observation"]),
             "reflections": len([m for m in self.memories if m.memory_type == "reflection"]),
+            "vector_enabled": self.use_vector,
             "recent": [m.to_dict() for m in self.memories[-10:]],
         }

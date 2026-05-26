@@ -19,3 +19,6 @@ dist/
 build/
 venv/
 .venv/
+
+# Vector DB local storage
+data/

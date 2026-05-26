@@ -33,6 +33,9 @@ class Resident:
     def __post_init__(self):
         if not self.current_location:
             self.current_location = self.home
+        # 用居民名字初始化记忆流（用于向量存储的 Collection 命名）
+        if not self.memory.owner_name:
+            self.memory = MemoryStream(owner_name=self.name)
 
     @property
     def profile_summary(self) -> str:
