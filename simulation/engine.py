@@ -38,6 +38,13 @@ from simulation.interactions import (
 from config import config
 
 
+# ─── 事件格式化工具 ─────────────────────────────────────────
+
+def _format_event(time_str: str, content: str) -> str:
+    """为事件统一加模拟时间戳：[hh:00] 原内容"""
+    return f"[{time_str.split(' ', 1)[-1]}] {content}"
+
+
 # ─── Supervisor State ────────────────────────────────────────
 
 class SimulationState(TypedDict):
@@ -139,7 +146,10 @@ class TownSimulation:
         location_options = self.town.get_location_names()
 
         # 并行运行所有居民的 Sub-graph
-        with ThreadPoolExecutor(max_workers=1) as executor:
+        # 并发上限交给 llm_utils 的信号量去控流（信号量保护 LLM 调用本身），
+        # 这里只需要给一个合理的线程数即可，避免双重节流导致串行。
+        max_workers = max(2, len(self.agents))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {
                 executor.submit(
                     agent.run,
@@ -160,9 +170,11 @@ class TownSimulation:
                     all_events.append(f"[错误] {agent_name} 执行失败: {e}")
                     logger.error("Agent %s failed: %s", agent_name, e)
 
+        # 统一为事件加上本轮模拟时间戳，便于日志展示
+        stamped = [_format_event(self.clock.time_str, e) for e in all_events]
         return {
-            "events": state["events"] + all_events,
-            "day_log": state["day_log"] + all_events,
+            "events": state["events"] + stamped,
+            "day_log": state["day_log"] + stamped,
             "agent_states": {n: r.to_dict() for n, r in self.residents.items()},
             "location_states": {
                 loc: self.town.get_agents_at(loc)
@@ -180,48 +192,59 @@ class TownSimulation:
         events = []
         conversations = []
 
-        interaction_pairs = set()
+        # 本轮已经配对的居民，避免同一轮内被多次拉去对话
+        paired_this_round: set[str] = set()
         for loc_name in self.town.get_location_names():
-            agents_here = self.town.get_agents_at(loc_name)
-            if len(agents_here) >= 2:
-                pair = tuple(sorted(random.sample(agents_here, 2)))
-                if pair not in interaction_pairs:
-                    interaction_pairs.add(pair)
-                    a1 = self.residents[pair[0]]
-                    a2 = self.residents[pair[1]]
+            agents_here = [
+                a for a in self.town.get_agents_at(loc_name)
+                if a not in paired_this_round
+            ]
+            if len(agents_here) < 2:
+                continue
+            # 随机打乱，再依次两两配对，确保每个未配对的居民都有机会参与
+            random.shuffle(agents_here)
+            for i in range(0, len(agents_here) - 1, 2):
+                a1_name, a2_name = agents_here[i], agents_here[i + 1]
+                a1 = self.residents[a1_name]
+                a2 = self.residents[a2_name]
+                paired_this_round.update([a1_name, a2_name])
 
-                    context = (
-                        f"时间: {self.clock.time_str}，地点: {loc_name}，"
-                        f"{a1.name}正在{a1.current_activity}，"
-                        f"{a2.name}正在{a2.current_activity}"
-                    )
+                context = (
+                    f"时间: {self.clock.time_str}，地点: {loc_name}，"
+                    f"{a1.name}正在{a1.current_activity}，"
+                    f"{a2.name}正在{a2.current_activity}"
+                )
 
-                    conversation = generate_conversation(a1, a2, context)
-                    conversations.append({
-                        "time": self.clock.time_str,
-                        "location": loc_name,
-                        "participants": list(pair),
-                        "content": conversation,
-                    })
+                conversation = generate_conversation(a1, a2, context)
+                conversations.append({
+                    "time": self.clock.time_str,
+                    "location": loc_name,
+                    "participants": [a1_name, a2_name],
+                    "content": conversation,
+                })
 
-                    # 写入双方记忆
-                    conv_summary = f"在{loc_name}和{a2.name}聊了天"
-                    importance = rate_importance(conv_summary, a1)
-                    a1.memory.add_observation(
-                        f"和{a2.name}在{loc_name}聊天: {conversation[:100]}...",
-                        importance,
-                        self.clock.time_str,
-                    )
-                    a2.memory.add_observation(
-                        f"和{a1.name}在{loc_name}聊天: {conversation[:100]}...",
-                        importance,
-                        self.clock.time_str,
-                    )
+                # 写入双方记忆
+                conv_summary = f"在{loc_name}和{a2.name}聊了天"
+                importance = rate_importance(conv_summary, a1)
+                a1.memory.add_observation(
+                    f"和{a2.name}在{loc_name}聊天: {conversation[:100]}...",
+                    importance,
+                    self.clock.time_str,
+                )
+                a2.memory.add_observation(
+                    f"和{a1.name}在{loc_name}聊天: {conversation[:100]}...",
+                    importance,
+                    self.clock.time_str,
+                )
 
-                    events.append(f"[对话] {pair[0]}和{pair[1]}在{loc_name}聊天")
-                    logger.debug("Conversation between %s and %s at %s", pair[0], pair[1], loc_name)
+                events.append(_format_event(
+                    self.clock.time_str,
+                    f"[对话] {a1_name}和{a2_name}在{loc_name}聊天",
+                ))
+                logger.debug("Conversation between %s and %s at %s", a1_name, a2_name, loc_name)
 
         logger.info("Interaction node produced %d events", len(events))
+        # 事件已经在生成时直接加了时间戳
         return {
             "events": state["events"] + events,
             "day_log": state["day_log"] + events,
@@ -257,8 +280,9 @@ class TownSimulation:
         """Supervisor 反思节点：一天结束，协调所有居民反思"""
         events = []
 
-        # 并行执行反思
-        with ThreadPoolExecutor(max_workers=1) as executor:
+        # 并行执行反思（线程数放宽，真正的限流交给 llm_utils 的信号量）
+        max_workers = max(2, len(self.residents))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {}
             for name, resident in self.residents.items():
                 if resident.memory.should_reflect(config.REFLECTION_THRESHOLD):
@@ -274,10 +298,16 @@ class TownSimulation:
                     resident.memory.add_reflection(
                         reflection, importance, self.clock.time_str
                     )
-                    events.append(f"[反思] {name}: {reflection}")
+                    events.append(_format_event(
+                        self.clock.time_str,
+                        f"[反思] {name}: {reflection}",
+                    ))
                     logger.debug("Reflection by %s: %s", name, reflection)
                 except Exception as e:
-                    events.append(f"[错误] {name} 反思失败: {e}")
+                    events.append(_format_event(
+                        self.clock.time_str,
+                        f"[错误] {name} 反思失败: {e}",
+                    ))
 
         # 所有居民回家睡觉
         for name, resident in self.residents.items():
@@ -288,10 +318,18 @@ class TownSimulation:
             resident.current_activity = "睡觉"
             resident.current_emotion = "平静"
 
+        # 反思完成后翻页到下一天
+        self.clock.advance_to_next_day()
+
         return {
             "events": state["events"] + events,
             "day_log": state["day_log"] + events,
+            "should_end_day": False,
             "agent_states": {n: r.to_dict() for n, r in self.residents.items()},
+            "time_str": self.clock.time_str,
+            "period": self.clock.period,
+            "day": self.clock.day,
+            "hour": self.clock.hour,
         }
 
     # ─── 条件路由 ─────────────────────────────────────────────
@@ -340,12 +378,27 @@ class TownSimulation:
         """运行单步（用于 Web 实时展示）"""
         state = self.get_initial_state()
 
+        # 如果已经到达 22:00（day_end），单步时直接走 reflect + 翻页
+        if self.clock.is_day_end:
+            state = {**state, **self._reflect_node(state)}
+            return state
+
         # 单步：dispatch → interact → advance_time
         state = {**state, **self._dispatch_agents_node(state)}
         state = {**state, **self._interact_node(state)}
         state = {**state, **self._advance_time_node(state)}
 
         return state
+
+    def end_day(self) -> dict:
+        """Web 单步模式下收尾一天：触发 reflect 并翻页"""
+        state = self.get_initial_state()
+        if not self.clock.is_day_end:
+            return {
+                **state,
+                "events": ["[系统] 还没到一天结束（22:00），无需收尾"],
+            }
+        return {**state, **self._reflect_node(state)}
 
     def get_status(self) -> dict:
         """获取当前模拟状态"""

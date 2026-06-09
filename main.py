@@ -6,9 +6,22 @@
     python main.py step     在终端单步运行
 """
 
+import io
 import sys
 import json
 import logging
+
+# Windows 终端默认 GBK 编码会导致 emoji 报错；强制以 UTF-8 输出
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
+else:
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8")
+
 logger = logging.getLogger(__name__)
 
 from config import config
@@ -64,16 +77,20 @@ def run_step_mode():
     logger.info("--- Step mode started ---")
     logger.info("Press Enter to execute next step, type 'q' to quit")
     sim = TownSimulation()
+
+    def _execute() -> dict:
+        if sim.clock.is_day_end:
+            return sim.end_day()
+        return sim.run_step()
+
     while True:
         cmd = input(f"[{sim.clock.time_str}] >>> ").strip()
-        if cmd:
-            state = sim.run_step()
-            logger.info("Executed step at %s", sim.clock.time_str)
-            logger.debug("Events: %s", state["events"][-5:])
         if cmd.lower() == "q":
             break
-
-        state = sim.run_step()
+        # 空回车 = 执行一步，非空指令也执行一步（统一行为）
+        state = _execute()
+        logger.info("Executed step at %s", sim.clock.time_str)
+        logger.debug("Events: %s", state["events"][-5:])
 
         for event in state["events"]:
             print(f"  {event}")

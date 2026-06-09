@@ -501,6 +501,19 @@
         let ws = null;
         let useLLM = true;
         let stepCount = 0;
+        let currentSimTime = '';
+        let currentSimPeriod = '';
+
+        function nowWall() {
+            return new Date().toLocaleTimeString('zh-CN', { hour12: false });
+        }
+
+        function pickSimTime(data) {
+            return data.sim_time || data.time || currentSimTime;
+        }
+        function pickSimPeriod(data) {
+            return data.sim_period || currentSimPeriod || '';
+        }
 
         // ─── 状态栏控制 ───
         function setStatus(state, text) {
@@ -563,8 +576,9 @@
             const container = document.getElementById('eventLog');
             const div = document.createElement('div');
             div.className = 'event-item system-msg';
-            const time = new Date().toLocaleTimeString('zh-CN', { hour12: false });
-            div.textContent = `[${time}] ${text}`;
+            const wall = nowWall();
+            const sim = currentSimTime ? ` · ${currentSimTime}` : '';
+            div.textContent = `[${wall}${sim}] ${text}`;
             container.prepend(div);
 
             // 限制条数
@@ -635,8 +649,10 @@
 
         // ─── 渲染 ───
         function renderInitialStatus(data) {
+            currentSimTime = data.clock.time_str || '';
+            currentSimPeriod = data.clock.period || '';
             document.getElementById('timeDisplay').textContent =
-                `${data.clock.time_str} · ${data.clock.period}`;
+                `${currentSimTime} · ${currentSimPeriod}   (墙钟 ${nowWall()})`;
             renderResidents(data.residents);
             renderMap(data.town.locations);
 
@@ -651,7 +667,12 @@
         }
 
         function updateUI(data) {
-            document.getElementById('timeDisplay').textContent = data.time;
+            const simTime = pickSimTime(data);
+            const simPeriod = pickSimPeriod(data);
+            if (simTime) currentSimTime = simTime;
+            if (simPeriod) currentSimPeriod = simPeriod;
+            document.getElementById('timeDisplay').textContent =
+                `${simTime}${simPeriod ? ' · ' + simPeriod : ''}   (墙钟 ${nowWall()})`;
             stepCount++;
 
             if (data.agent_states) {
@@ -741,8 +762,17 @@
                 let cls = 'event-item';
                 if (event.includes('[对话]')) cls += ' conversation';
                 if (event.includes('[反思]')) cls += ' reflection';
+
+                let text = event;
+                const hasStamp = /^\[\d{2}:\d{2}\]/.test(event);
+                if (!hasStamp && currentSimTime) {
+                    const parts = currentSimTime.split(' ');
+                    const hh = parts.length > 1 ? parts[parts.length - 1] : currentSimTime;
+                    text = `[${hh}] ${event}`;
+                }
+
                 div.className = cls;
-                div.textContent = event;
+                div.textContent = text;
                 container.prepend(div);
             }
 
@@ -757,8 +787,14 @@
             for (const conv of conversations) {
                 const div = document.createElement('div');
                 div.className = 'event-item conversation';
+                let stamp = '';
+                if (conv.time) {
+                    const parts = String(conv.time).split(' ');
+                    stamp = parts.length > 1 ? parts[parts.length - 1] : conv.time;
+                }
+                const stampStr = stamp ? `[${stamp}] ` : '';
                 div.innerHTML = `
-                    <strong>💬 ${conv.participants.join(' & ')} 在${conv.location}的对话</strong>
+                    <strong>💬 ${stampStr}${conv.participants.join(' & ')} 在${conv.location}的对话</strong>
                     <div class="conversation-content">${conv.content}</div>
                 `;
                 container.prepend(div);
@@ -898,6 +934,15 @@
                 setStatus('error', '加载失败，请刷新页面');
             }
             initWebSocket();
+
+            // 每秒刷新墙钟时间显示
+            setInterval(() => {
+                const el = document.getElementById('timeDisplay');
+                if (el && currentSimTime) {
+                    el.textContent =
+                        `${currentSimTime} · ${currentSimPeriod}   (墙钟 ${nowWall()})`;
+                }
+            }, 1000);
         });
     </script>
 </body>

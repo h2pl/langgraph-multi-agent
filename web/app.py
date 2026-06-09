@@ -107,6 +107,9 @@ async def run_step():
         "type": "step_update",
         "data": {
             "time": state["time_str"],
+            "sim_time": sim.clock.time_str,
+            "sim_period": sim.clock.period,
+            "sim_day": sim.clock.day,
             "events": state["events"][-10:],
             "conversations": state.get("conversations", []),
             "agent_states": state["agent_states"],
@@ -169,6 +172,9 @@ async def websocket_endpoint(websocket: WebSocket):
                     "type": "step_update",
                     "data": {
                         "time": state["time_str"],
+                        "sim_time": sim.clock.time_str,
+                        "sim_period": sim.clock.period,
+                        "sim_day": sim.clock.day,
                         "events": state["events"][-10:],
                         "conversations": state.get("conversations", []),
                         "agent_states": state["agent_states"],
@@ -194,6 +200,9 @@ async def websocket_endpoint(websocket: WebSocket):
                         "type": "step_update",
                         "data": {
                             "time": state["time_str"],
+                            "sim_time": sim.clock.time_str,
+                            "sim_period": sim.clock.period,
+                            "sim_day": sim.clock.day,
                             "events": state["events"][-10:],
                             "conversations": state.get("conversations", []),
                             "agent_states": state["agent_states"],

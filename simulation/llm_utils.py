@@ -10,8 +10,8 @@ from config import config
 logger = logging.getLogger(__name__)
 
 # ─── 全局速率控制 ─────────────────────────────────────────────
-# 限制同时并发的 LLM 请求数
-_MAX_CONCURRENT = 1
+# 同时并发的 LLM 请求数限制（OpenAI 兼容 API 通常允许少量并发）
+_MAX_CONCURRENT = 3
 _semaphore = threading.Semaphore(_MAX_CONCURRENT)
 
 # 请求间最小间隔（秒），防止瞬间打爆速率
