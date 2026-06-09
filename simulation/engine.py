@@ -122,7 +122,8 @@ class TownSimulation:
         graph.add_edge("reflect", END)
 
         self.graph = graph.compile()
-        logger.info("Supervisor graph compiled")
+        mode = "LLM (大模型生成)" if config.USE_LLM else "Random (系统随机模拟)"
+        logger.info("Supervisor graph compiled | Mode: %s", mode)
 
     # ─── Supervisor 节点 ─────────────────────────────────────
 
@@ -138,7 +139,7 @@ class TownSimulation:
         location_options = self.town.get_location_names()
 
         # 并行运行所有居民的 Sub-graph
-        with ThreadPoolExecutor(max_workers=len(self.agents)) as executor:
+        with ThreadPoolExecutor(max_workers=1) as executor:
             futures = {
                 executor.submit(
                     agent.run,
@@ -257,7 +258,7 @@ class TownSimulation:
         events = []
 
         # 并行执行反思
-        with ThreadPoolExecutor(max_workers=len(self.residents)) as executor:
+        with ThreadPoolExecutor(max_workers=1) as executor:
             futures = {}
             for name, resident in self.residents.items():
                 if resident.memory.should_reflect(config.REFLECTION_THRESHOLD):

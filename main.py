@@ -8,6 +8,8 @@
 
 import sys
 import json
+import logging
+logger = logging.getLogger(__name__)
 
 from config import config
 
@@ -59,12 +61,15 @@ def run_step_mode():
     """终端单步模式"""
     from simulation.engine import TownSimulation
 
+    logger.info("--- Step mode started ---")
+    logger.info("Press Enter to execute next step, type 'q' to quit")
     sim = TownSimulation()
-    print("🏘️  桃源镇 · 单步模拟模式")
-    print("按 Enter 执行下一步, 输入 q 退出\n")
-
     while True:
         cmd = input(f"[{sim.clock.time_str}] >>> ").strip()
+        if cmd:
+            state = sim.run_step()
+            logger.info("Executed step at %s", sim.clock.time_str)
+            logger.debug("Events: %s", state["events"][-5:])
         if cmd.lower() == "q":
             break
 

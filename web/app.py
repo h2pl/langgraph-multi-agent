@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -12,6 +13,8 @@ from fastapi.staticfiles import StaticFiles
 
 from simulation.engine import TownSimulation
 from config import config
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="桃源镇 - AI 小镇模拟")
 
@@ -32,6 +35,51 @@ def get_simulation() -> TownSimulation:
     return simulation
 
 
+async def broadcast_progress(phase: str, detail: str = ""):
+    """向所有 WebSocket 客户端广播进度消息"""
+    message = json.dumps({
+        "type": "progress",
+        "data": {"phase": phase, "detail": detail}
+    }, ensure_ascii=False)
+
+    dead_clients = []
+    for client in connected_clients:
+        try:
+            await client.send_text(message)
+        except Exception:
+            dead_clients.append(client)
+    for c in dead_clients:
+        if c in connected_clients:
+            connected_clients.remove(c)
+
+
+async def run_step_with_progress(sim: TownSimulation) -> dict:
+    """运行单步并通过 WebSocket 发送进度"""
+    state = sim.get_initial_state()
+
+    # 阶段 1: 调度 Agents
+    mode_label = "LLM 生成中" if config.USE_LLM else "随机模拟中"
+    await broadcast_progress("dispatch", f"正在调度居民行为 ({mode_label})...")
+    state = await asyncio.get_event_loop().run_in_executor(
+        None, lambda: {**state, **sim._dispatch_agents_node(state)}
+    )
+
+    # 阶段 2: 交互
+    await broadcast_progress("interact", "正在处理居民交互...")
+    state = await asyncio.get_event_loop().run_in_executor(
+        None, lambda: {**state, **sim._interact_node(state)}
+    )
+
+    # 阶段 3: 推进时间
+    await broadcast_progress("advance", "正在推进时间...")
+    state = await asyncio.get_event_loop().run_in_executor(
+        None, lambda: {**state, **sim._advance_time_node(state)}
+    )
+
+    await broadcast_progress("done", "步骤完成")
+    return state
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index():
     """主页"""
@@ -43,14 +91,16 @@ async def index():
 async def get_status():
     """获取当前状态"""
     sim = get_simulation()
-    return sim.get_status()
+    status = sim.get_status()
+    status["use_llm"] = config.USE_LLM
+    return status
 
 
 @app.post("/api/step")
 async def run_step():
-    """执行一步模拟"""
+    """执行一步模拟（带进度推送）"""
     sim = get_simulation()
-    state = sim.run_step()
+    state = await run_step_with_progress(sim)
 
     # 通知所有 WebSocket 客户端
     message = json.dumps({
@@ -77,7 +127,13 @@ async def run_step():
 async def run_day():
     """运行一整天"""
     sim = get_simulation()
-    state = sim.run_day()
+    await broadcast_progress("day_start", "开始运行一整天的模拟...")
+
+    state = await asyncio.get_event_loop().run_in_executor(
+        None, sim.run_day
+    )
+
+    await broadcast_progress("done", "一天模拟完成")
     return {
         "status": "ok",
         "day": state["day"],
@@ -90,7 +146,9 @@ async def run_day():
 async def reset():
     """重置模拟"""
     global simulation
+    await broadcast_progress("reset", "正在重置模拟...")
     simulation = TownSimulation()
+    await broadcast_progress("done", "重置完成")
     return {"status": "ok"}
 
 
@@ -106,7 +164,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
             if msg.get("action") == "step":
                 sim = get_simulation()
-                state = sim.run_step()
+                state = await run_step_with_progress(sim)
                 await websocket.send_text(json.dumps({
                     "type": "step_update",
                     "data": {
@@ -120,16 +178,18 @@ async def websocket_endpoint(websocket: WebSocket):
 
             elif msg.get("action") == "status":
                 sim = get_simulation()
+                status = sim.get_status()
+                status["use_llm"] = config.USE_LLM
                 await websocket.send_text(json.dumps({
                     "type": "status",
-                    "data": sim.get_status(),
+                    "data": status,
                 }, ensure_ascii=False))
 
             elif msg.get("action") == "auto_run":
                 sim = get_simulation()
                 steps = msg.get("steps", 5)
-                for _ in range(steps):
-                    state = sim.run_step()
+                for i in range(steps):
+                    state = await run_step_with_progress(sim)
                     await websocket.send_text(json.dumps({
                         "type": "step_update",
                         "data": {
@@ -143,7 +203,8 @@ async def websocket_endpoint(websocket: WebSocket):
                     await asyncio.sleep(1)
 
     except WebSocketDisconnect:
-        connected_clients.remove(websocket)
+        if websocket in connected_clients:
+            connected_clients.remove(websocket)
 
 
 def start_server():

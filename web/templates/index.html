@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>🏘️ 桃源镇 - AI 小镇模拟</title>
+    <title>桃源镇 - AI 小镇模拟</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -36,6 +36,119 @@
             color: #a0a0ff;
         }
 
+        /* ─── 状态栏 ─── */
+        .status-bar {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            padding: 10px 20px;
+            min-height: 44px;
+            background: rgba(0,0,0,0.3);
+            border-bottom: 1px solid rgba(255,255,255,0.06);
+            font-size: 14px;
+            transition: all 0.3s;
+        }
+
+        .status-bar.busy {
+            background: rgba(102, 126, 234, 0.15);
+            border-bottom-color: rgba(102, 126, 234, 0.3);
+        }
+
+        .status-bar.done {
+            background: rgba(67, 233, 123, 0.1);
+            border-bottom-color: rgba(67, 233, 123, 0.2);
+        }
+
+        .status-bar.error {
+            background: rgba(245, 87, 108, 0.15);
+            border-bottom-color: rgba(245, 87, 108, 0.3);
+        }
+
+        .status-spinner {
+            display: none;
+            width: 16px;
+            height: 16px;
+            border: 2px solid rgba(255,255,255,0.2);
+            border-top-color: #667eea;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+
+        .status-bar.busy .status-spinner {
+            display: inline-block;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #555;
+            transition: background 0.3s;
+        }
+
+        .status-bar.busy .status-dot { background: #667eea; box-shadow: 0 0 8px #667eea; }
+        .status-bar.done .status-dot { background: #43e97b; box-shadow: 0 0 8px #43e97b; }
+        .status-bar.error .status-dot { background: #f5576c; box-shadow: 0 0 8px #f5576c; }
+
+        .status-text {
+            color: #b0b0b0;
+            transition: color 0.3s;
+        }
+
+        .status-bar.busy .status-text { color: #a0b0ff; }
+        .status-bar.done .status-text { color: #80e0a0; }
+
+        .mode-badge {
+            display: inline-block;
+            padding: 2px 10px;
+            border-radius: 10px;
+            font-size: 11px;
+            font-weight: 600;
+            margin-left: 8px;
+        }
+
+        .mode-badge.llm {
+            background: rgba(240, 147, 251, 0.25);
+            color: #f093fb;
+            border: 1px solid rgba(240, 147, 251, 0.4);
+        }
+
+        .mode-badge.random {
+            background: rgba(67, 233, 123, 0.2);
+            color: #43e97b;
+            border: 1px solid rgba(67, 233, 123, 0.3);
+        }
+
+        /* ─── 进度条 ─── */
+        .progress-track {
+            height: 3px;
+            background: rgba(255,255,255,0.05);
+            overflow: hidden;
+        }
+
+        .progress-bar {
+            height: 100%;
+            width: 0%;
+            background: linear-gradient(90deg, #667eea, #f093fb);
+            transition: width 0.5s ease;
+        }
+
+        .progress-bar.indeterminate {
+            width: 30%;
+            animation: indeterminate 1.5s infinite ease-in-out;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        @keyframes indeterminate {
+            0% { margin-left: -30%; }
+            100% { margin-left: 100%; }
+        }
+
+        /* ─── 控制按钮 ─── */
         .controls {
             display: flex;
             justify-content: center;
@@ -51,6 +164,7 @@
             font-weight: 600;
             cursor: pointer;
             transition: all 0.3s;
+            position: relative;
         }
 
         .btn-step {
@@ -74,7 +188,7 @@
             border: 1px solid rgba(255,255,255,0.2) !important;
         }
 
-        .controls button:hover {
+        .controls button:hover:not(:disabled) {
             transform: translateY(-2px);
             box-shadow: 0 4px 15px rgba(0,0,0,0.3);
         }
@@ -85,6 +199,7 @@
             transform: none;
         }
 
+        /* ─── 主布局 ─── */
         .main-grid {
             display: grid;
             grid-template-columns: 300px 1fr 320px;
@@ -92,7 +207,7 @@
             padding: 16px;
             max-width: 1400px;
             margin: 0 auto;
-            min-height: calc(100vh - 160px);
+            min-height: calc(100vh - 200px);
         }
 
         .panel {
@@ -114,10 +229,10 @@
         .panel-body {
             padding: 12px;
             overflow-y: auto;
-            max-height: calc(100vh - 240px);
+            max-height: calc(100vh - 280px);
         }
 
-        /* 居民卡片 */
+        /* ─── 居民卡片 ─── */
         .resident-card {
             padding: 12px;
             margin-bottom: 10px;
@@ -152,7 +267,7 @@
             margin-top: 4px;
         }
 
-        /* 地图 */
+        /* ─── 地图 ─── */
         .town-map {
             display: grid;
             grid-template-columns: repeat(3, 1fr);
@@ -199,7 +314,7 @@
             background: rgba(245, 87, 108, 0.3);
         }
 
-        /* 事件日志 */
+        /* ─── 事件日志 ─── */
         .event-item {
             padding: 8px 12px;
             margin-bottom: 6px;
@@ -219,6 +334,13 @@
         .event-item.reflection {
             border-left-color: #fda085;
             background: rgba(253, 160, 133, 0.08);
+        }
+
+        .event-item.system-msg {
+            border-left-color: #667eea;
+            background: rgba(102, 126, 234, 0.1);
+            color: #a0b0ff;
+            font-size: 12px;
         }
 
         .conversation-content {
@@ -253,6 +375,30 @@
             66% { content: '...'; }
         }
 
+        /* ─── 步骤指示器 ─── */
+        .step-phases {
+            display: flex;
+            gap: 4px;
+            margin-left: 12px;
+        }
+
+        .phase-dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: rgba(255,255,255,0.15);
+            transition: all 0.3s;
+        }
+
+        .phase-dot.active {
+            background: #667eea;
+            box-shadow: 0 0 6px #667eea;
+        }
+
+        .phase-dot.completed {
+            background: #43e97b;
+        }
+
         @media (max-width: 1024px) {
             .main-grid {
                 grid-template-columns: 1fr;
@@ -262,21 +408,39 @@
 </head>
 <body>
     <div class="header">
-        <h1>🏘️ 桃源镇 · AI 小镇模拟</h1>
+        <h1>桃源镇 · AI 小镇模拟</h1>
         <div class="time-display" id="timeDisplay">加载中...</div>
     </div>
 
+    <!-- 状态栏 -->
+    <div class="status-bar" id="statusBar">
+        <div class="status-dot"></div>
+        <div class="status-spinner"></div>
+        <span class="status-text" id="statusText">就绪 - 点击按钮开始模拟</span>
+        <span class="mode-badge" id="modeBadge" style="display:none;"></span>
+        <div class="step-phases" id="stepPhases" style="display:none;">
+            <div class="phase-dot" id="phase1" title="调度居民"></div>
+            <div class="phase-dot" id="phase2" title="居民交互"></div>
+            <div class="phase-dot" id="phase3" title="推进时间"></div>
+        </div>
+    </div>
+
+    <!-- 进度条 -->
+    <div class="progress-track">
+        <div class="progress-bar" id="progressBar"></div>
+    </div>
+
     <div class="controls">
-        <button class="btn-step" onclick="doStep()" id="btnStep">⏭️ 下一步</button>
-        <button class="btn-auto" onclick="autoRun()" id="btnAuto">▶️ 自动运行</button>
-        <button class="btn-day" onclick="runDay()" id="btnDay">🌅 运行一天</button>
-        <button class="btn-reset" onclick="resetSim()">🔄 重置</button>
+        <button class="btn-step" onclick="doStep()" id="btnStep">下一步</button>
+        <button class="btn-auto" onclick="autoRun()" id="btnAuto">自动运行</button>
+        <button class="btn-day" onclick="runDay()" id="btnDay">运行一天</button>
+        <button class="btn-reset" onclick="resetSim()" id="btnReset">重置</button>
     </div>
 
     <div class="main-grid">
         <!-- 左侧：居民列表 -->
         <div class="panel">
-            <div class="panel-title">👥 居民</div>
+            <div class="panel-title">居民</div>
             <div class="panel-body" id="residentList">
                 <div class="loading">加载中</div>
             </div>
@@ -284,7 +448,7 @@
 
         <!-- 中间：小镇地图 -->
         <div class="panel">
-            <div class="panel-title">🗺️ 桃源镇地图</div>
+            <div class="panel-title">桃源镇地图</div>
             <div class="panel-body">
                 <div class="town-map" id="townMap">
                     <div class="loading">加载中</div>
@@ -294,11 +458,9 @@
 
         <!-- 右侧：事件日志 -->
         <div class="panel">
-            <div class="panel-title">📜 事件日志</div>
+            <div class="panel-title">事件日志</div>
             <div class="panel-body" id="eventLog">
-                <div style="color:#666; text-align:center; padding:20px;">
-                    点击"下一步"开始模拟
-                </div>
+                <div class="event-item system-msg">系统就绪，点击"下一步"开始模拟</div>
             </div>
         </div>
     </div>
@@ -326,10 +488,92 @@
             '赵大姐': '#fda085',
         };
 
+        const PHASE_MAP = {
+            'dispatch': { index: 1, label: '正在调度居民行为' },
+            'interact': { index: 2, label: '正在处理居民交互' },
+            'advance':  { index: 3, label: '正在推进时间' },
+            'done':     { index: 4, label: '步骤完成' },
+            'day_start':{ index: 0, label: '正在运行一整天' },
+            'reset':    { index: 0, label: '正在重置' },
+        };
+
         let isRunning = false;
         let ws = null;
+        let useLLM = true;
+        let stepCount = 0;
 
-        // 初始化 WebSocket
+        // ─── 状态栏控制 ───
+        function setStatus(state, text) {
+            const bar = document.getElementById('statusBar');
+            const textEl = document.getElementById('statusText');
+            bar.className = 'status-bar ' + state; // 'busy', 'done', 'error', ''
+            textEl.textContent = text;
+        }
+
+        function showPhases(show) {
+            document.getElementById('stepPhases').style.display = show ? 'flex' : 'none';
+            if (!show) {
+                document.querySelectorAll('.phase-dot').forEach(d => {
+                    d.className = 'phase-dot';
+                });
+            }
+        }
+
+        function updatePhase(phaseKey) {
+            const info = PHASE_MAP[phaseKey];
+            if (!info) return;
+
+            // Update phase dots
+            for (let i = 1; i <= 3; i++) {
+                const dot = document.getElementById('phase' + i);
+                if (i < info.index) {
+                    dot.className = 'phase-dot completed';
+                } else if (i === info.index) {
+                    dot.className = 'phase-dot active';
+                } else {
+                    dot.className = 'phase-dot';
+                }
+            }
+        }
+
+        function setProgressBar(percent, indeterminate = false) {
+            const bar = document.getElementById('progressBar');
+            if (indeterminate) {
+                bar.style.width = '';
+                bar.className = 'progress-bar indeterminate';
+            } else {
+                bar.className = 'progress-bar';
+                bar.style.width = percent + '%';
+            }
+        }
+
+        function updateModeBadge() {
+            const badge = document.getElementById('modeBadge');
+            badge.style.display = 'inline-block';
+            if (useLLM) {
+                badge.className = 'mode-badge llm';
+                badge.textContent = 'LLM 模式';
+            } else {
+                badge.className = 'mode-badge random';
+                badge.textContent = '随机模式';
+            }
+        }
+
+        function addSystemLog(text) {
+            const container = document.getElementById('eventLog');
+            const div = document.createElement('div');
+            div.className = 'event-item system-msg';
+            const time = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+            div.textContent = `[${time}] ${text}`;
+            container.prepend(div);
+
+            // 限制条数
+            while (container.children.length > 100) {
+                container.removeChild(container.lastChild);
+            }
+        }
+
+        // ─── WebSocket ───
         function initWebSocket() {
             const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
             ws = new WebSocket(`${protocol}//${location.host}/ws`);
@@ -340,29 +584,75 @@
                     updateUI(msg.data);
                 } else if (msg.type === 'status') {
                     renderInitialStatus(msg.data);
+                } else if (msg.type === 'progress') {
+                    handleProgress(msg.data);
                 }
             };
 
             ws.onopen = () => {
                 ws.send(JSON.stringify({ action: 'status' }));
+                addSystemLog('WebSocket 已连接');
             };
 
             ws.onclose = () => {
+                addSystemLog('WebSocket 断开，3秒后重连...');
                 setTimeout(initWebSocket, 3000);
             };
         }
 
-        // 渲染初始状态
+        function handleProgress(data) {
+            const phase = data.phase;
+            const detail = data.detail || '';
+            const info = PHASE_MAP[phase];
+
+            if (phase === 'done') {
+                setStatus('done', detail || '完成');
+                setProgressBar(100);
+                showPhases(false);
+                // 1.5秒后恢复
+                setTimeout(() => {
+                    setStatus('', '就绪');
+                    setProgressBar(0);
+                }, 1500);
+            } else if (info) {
+                setStatus('busy', detail || info.label);
+                showPhases(true);
+                updatePhase(phase);
+                // 根据阶段估算进度
+                const progressMap = { 'dispatch': 20, 'interact': 60, 'advance': 90, 'day_start': 0 };
+                if (phase === 'day_start') {
+                    setProgressBar(0, true);  // indeterminate for day run
+                } else {
+                    setProgressBar(progressMap[phase] || 50);
+                }
+            }
+
+            // 将重要进度记录到日志
+            if (detail && phase !== 'done') {
+                addSystemLog(detail);
+            }
+        }
+
+        // ─── 渲染 ───
         function renderInitialStatus(data) {
             document.getElementById('timeDisplay').textContent =
                 `${data.clock.time_str} · ${data.clock.period}`;
             renderResidents(data.residents);
             renderMap(data.town.locations);
+
+            // 读取模式
+            if (data.use_llm !== undefined) {
+                useLLM = data.use_llm;
+                updateModeBadge();
+            }
+
+            setStatus('done', '数据加载完成');
+            setTimeout(() => setStatus('', '就绪'), 1500);
         }
 
-        // 更新 UI
         function updateUI(data) {
             document.getElementById('timeDisplay').textContent = data.time;
+            stepCount++;
 
             if (data.agent_states) {
                 renderResidents(data.agent_states);
@@ -378,7 +668,6 @@
             }
         }
 
-        // 渲染居民列表
         function renderResidents(residents) {
             const container = document.getElementById('residentList');
             container.innerHTML = '';
@@ -390,7 +679,7 @@
                 card.innerHTML = `
                     <div class="resident-name" style="color:${color}">${name}</div>
                     <div class="resident-info">
-                        👤 ${info.occupation || info.age + '岁'}<br>
+                        ${info.occupation || info.age + '岁'}<br>
                         📍 ${info.current_location}<br>
                         🎯 ${info.current_activity}
                     </div>
@@ -400,7 +689,6 @@
             }
         }
 
-        // 渲染地图
         function renderMap(locations) {
             const container = document.getElementById('townMap');
             container.innerHTML = '';
@@ -428,7 +716,6 @@
             }
         }
 
-        // 更新地图（仅更新人员位置）
         function updateMap(locationStates) {
             for (const [name, occupants] of Object.entries(locationStates)) {
                 const card = document.getElementById(`loc-${name}`);
@@ -446,12 +733,8 @@
             }
         }
 
-        // 添加事件
         function appendEvents(events) {
             const container = document.getElementById('eventLog');
-            // 移除初始提示
-            const placeholder = container.querySelector('div[style]');
-            if (placeholder) placeholder.remove();
 
             for (const event of events) {
                 const div = document.createElement('div');
@@ -463,13 +746,11 @@
                 container.prepend(div);
             }
 
-            // 限制最大条数
             while (container.children.length > 100) {
                 container.removeChild(container.lastChild);
             }
         }
 
-        // 添加对话
         function appendConversations(conversations) {
             const container = document.getElementById('eventLog');
 
@@ -484,47 +765,72 @@
             }
         }
 
-        // 控制按钮
+        // ─── 控制按钮 ───
         async function doStep() {
             setButtonsDisabled(true);
+            setStatus('busy', '正在执行下一步...');
+            showPhases(true);
+            setProgressBar(10);
+            addSystemLog('开始执行下一步');
+
             try {
                 const res = await fetch('/api/step', { method: 'POST' });
                 const data = await res.json();
                 updateUI(data.state);
             } catch (e) {
                 console.error(e);
+                setStatus('error', '执行出错: ' + e.message);
+                addSystemLog('执行出错: ' + e.message);
             }
+
             setButtonsDisabled(false);
         }
 
         async function autoRun() {
             if (isRunning) {
                 isRunning = false;
-                document.getElementById('btnAuto').textContent = '▶️ 自动运行';
+                document.getElementById('btnAuto').textContent = '自动运行';
+                setStatus('', '已暂停');
+                setProgressBar(0);
+                setButtonsDisabled(false);
+                addSystemLog('自动运行已暂停');
                 return;
             }
 
             isRunning = true;
-            document.getElementById('btnAuto').textContent = '⏸️ 暂停';
+            document.getElementById('btnAuto').textContent = '暂停';
+            document.getElementById('btnStep').disabled = true;
+            document.getElementById('btnDay').disabled = true;
+            addSystemLog('开始自动运行');
 
+            let step = 0;
             while (isRunning) {
+                step++;
+                setStatus('busy', `自动运行中 (第 ${step} 步)...`);
+
                 try {
                     const res = await fetch('/api/step', { method: 'POST' });
                     const data = await res.json();
                     updateUI(data.state);
-                    await new Promise(r => setTimeout(r, 2000));
+                    await new Promise(r => setTimeout(r, 1500));
                 } catch (e) {
                     console.error(e);
                     isRunning = false;
+                    setStatus('error', '自动运行出错: ' + e.message);
+                    addSystemLog('自动运行出错: ' + e.message);
                 }
             }
 
-            document.getElementById('btnAuto').textContent = '▶️ 自动运行';
+            document.getElementById('btnAuto').textContent = '自动运行';
+            setButtonsDisabled(false);
         }
 
         async function runDay() {
             setButtonsDisabled(true);
-            document.getElementById('btnDay').textContent = '🔄 模拟中...';
+            document.getElementById('btnDay').textContent = '模拟中...';
+            setStatus('busy', '正在运行一整天的模拟...');
+            setProgressBar(0, true);
+            addSystemLog('开始运行一整天');
 
             try {
                 const res = await fetch('/api/run_day', { method: 'POST' });
@@ -536,37 +842,60 @@
                 const statusRes = await fetch('/api/status');
                 const status = await statusRes.json();
                 renderInitialStatus(status);
+
+                addSystemLog('一天模拟已完成');
             } catch (e) {
                 console.error(e);
+                setStatus('error', '运行出错: ' + e.message);
+                addSystemLog('运行一天出错: ' + e.message);
             }
 
-            document.getElementById('btnDay').textContent = '🌅 运行一天';
+            document.getElementById('btnDay').textContent = '运行一天';
             setButtonsDisabled(false);
         }
 
         async function resetSim() {
-            await fetch('/api/reset', { method: 'POST' });
-            document.getElementById('eventLog').innerHTML =
-                '<div style="color:#666; text-align:center; padding:20px;">点击"下一步"开始模拟</div>';
+            setButtonsDisabled(true);
+            setStatus('busy', '正在重置...');
+            addSystemLog('开始重置模拟');
 
-            const res = await fetch('/api/status');
-            const data = await res.json();
-            renderInitialStatus(data);
+            try {
+                await fetch('/api/reset', { method: 'POST' });
+
+                document.getElementById('eventLog').innerHTML =
+                    '<div class="event-item system-msg">模拟已重置，点击"下一步"开始</div>';
+
+                const res = await fetch('/api/status');
+                const data = await res.json();
+                renderInitialStatus(data);
+
+                stepCount = 0;
+                addSystemLog('重置完成');
+            } catch (e) {
+                setStatus('error', '重置失败: ' + e.message);
+            }
+
+            setButtonsDisabled(false);
         }
 
         function setButtonsDisabled(disabled) {
             document.getElementById('btnStep').disabled = disabled;
             document.getElementById('btnDay').disabled = disabled;
+            document.getElementById('btnReset').disabled = disabled;
+            // Don't disable auto button - it's used for pause
         }
 
-        // 初始化
+        // ─── 初始化 ───
         window.addEventListener('load', async () => {
             try {
+                setStatus('busy', '正在加载初始数据...');
+                setProgressBar(0, true);
                 const res = await fetch('/api/status');
                 const data = await res.json();
                 renderInitialStatus(data);
             } catch (e) {
                 console.error('Failed to load initial status:', e);
+                setStatus('error', '加载失败，请刷新页面');
             }
             initWebSocket();
         });

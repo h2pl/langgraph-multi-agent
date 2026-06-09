@@ -15,6 +15,7 @@ class Config:
 
     # 向量存储配置
     USE_VECTOR_STORE: bool = os.getenv("USE_VECTOR_STORE", "true").lower() == "true"
+    USE_LLM: bool = os.getenv("USE_LLM", "true").lower() == "true"
 
     # 模拟配置
     SIMULATION_SPEED: int = int(os.getenv("SIMULATION_SPEED", "1"))

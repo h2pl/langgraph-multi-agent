@@ -1,13 +1,187 @@
-"""Agent 交互逻辑 - 对话和行为"""
+"""Agent 交互逻辑 - 对话和行为
+
+支持两种模式（由 config.USE_LLM 控制）:
+  - LLM 模式: 调用大模型生成丰富的行为和对话
+  - 随机模式: 系统随机模拟，不消耗 API 配额
+"""
 
 from __future__ import annotations
 
+import random
+import logging
+
 from simulation.llm_utils import llm_call_sync
 from agents.resident import Resident
+from config import config
 
+logger = logging.getLogger(__name__)
+
+
+# ═══════════════════════════════════════════════════════════════
+#  随机模拟用的模板数据
+# ═══════════════════════════════════════════════════════════════
+
+# 按时间段划分的活动模板: {period: [(activity, emotion), ...]}
+_PERIOD_ACTIVITIES = {
+    "清晨": [
+        ("晨练", "精神"),
+        ("准备早餐", "平静"),
+        ("打扫卫生", "平静"),
+        ("早起散步", "愉快"),
+    ],
+    "上午": [
+        ("工作", "专注"),
+        ("处理事务", "平静"),
+        ("整理东西", "平静"),
+        ("看书", "专注"),
+        ("和邻居聊天", "愉快"),
+    ],
+    "中午": [
+        ("吃午饭", "满足"),
+        ("午休", "平静"),
+        ("闲逛", "悠闲"),
+        ("买东西", "平静"),
+    ],
+    "下午": [
+        ("继续工作", "专注"),
+        ("喝茶休息", "悠闲"),
+        ("散步", "愉快"),
+        ("拜访朋友", "愉快"),
+        ("处理杂事", "平静"),
+    ],
+    "傍晚": [
+        ("准备晚饭", "平静"),
+        ("在广场散步", "悠闲"),
+        ("和人聊天", "愉快"),
+        ("收拾东西", "平静"),
+    ],
+    "晚上": [
+        ("看电视", "悠闲"),
+        ("读书", "平静"),
+        ("和家人聊天", "温馨"),
+        ("准备休息", "平静"),
+    ],
+}
+
+# 通用活动（任何时间段都可以）
+_GENERIC_ACTIVITIES = [
+    ("四处闲逛", "悠闲"),
+    ("发呆", "平静"),
+    ("想事情", "若有所思"),
+]
+
+# 随机对话模板
+_CONVERSATION_TEMPLATES = [
+    [
+        "{a1}: 嗨，{a2}，你今天怎么样？",
+        "{a2}: 还不错啊，你呢？",
+        "{a1}: 挺好的，就是有点忙。",
+        "{a2}: 忙点好，说明生活充实嘛。",
+    ],
+    [
+        "{a1}: {a2}，好久没见你了！",
+        "{a2}: 是啊，最近都忙什么呢？",
+        "{a1}: 还是老样子，{act1}。你呢？",
+        "{a2}: 我也差不多，{act2}。",
+        "{a1}: 有空一起坐坐啊。",
+    ],
+    [
+        "{a1}: 今天天气真不错。",
+        "{a2}: 是啊，适合出来走走。",
+        "{a1}: 你这是要去哪啊？",
+        "{a2}: 随便逛逛，透透气。",
+    ],
+    [
+        "{a1}: {a2}，吃了没？",
+        "{a2}: 还没呢，正想着去哪吃。",
+        "{a1}: 走，一起去老王面馆吧。",
+        "{a2}: 好主意，走！",
+    ],
+    [
+        "{a1}: 最近镇上有什么新鲜事吗？",
+        "{a2}: 没什么大事，就是日子过得挺平静的。",
+        "{a1}: 平静就好，平平安安的。",
+        "{a2}: 说得对，知足常乐。",
+    ],
+]
+
+# 反思模板
+_REFLECTION_TEMPLATES = [
+    "今天过得还算充实，{name}觉得这样的日子挺好的。",
+    "{name}想着，应该多和邻居们走动走动。",
+    "忙了一天，{name}觉得有些累，但心里很踏实。",
+    "{name}觉得小镇的生活虽然平淡，但自有它的温暖。",
+    "回想今天的事，{name}嘴角不自觉地上扬了。",
+    "{name}决定明天要早点起来，好好安排一下。",
+    "今天和大家聊了聊，{name}觉得心情好了不少。",
+    "{name}想，生活不就是这样一天天过的嘛。",
+]
+
+
+# ═══════════════════════════════════════════════════════════════
+#  随机模拟实现
+# ═══════════════════════════════════════════════════════════════
+
+def _random_plan(agent: Resident, time_str: str, period: str, location_options: list[str]) -> dict:
+    """系统随机生成行动计划（不调用 LLM）"""
+    # 根据时间段选活动
+    activities = _PERIOD_ACTIVITIES.get(period, _GENERIC_ACTIVITIES)
+    activity, emotion = random.choice(activities)
+
+    # 根据职业和时间段决定大概率去哪
+    workplace = getattr(agent, "workplace", None)
+    home = getattr(agent, "home", agent.current_location)
+
+    if period in ("清晨", "晚上"):
+        # 早晚大概率在家
+        location = home if home in location_options else random.choice(location_options)
+    elif period in ("上午", "下午") and workplace and workplace in location_options:
+        # 工作时间大概率在工作地点
+        location = workplace if random.random() < 0.7 else random.choice(location_options)
+    else:
+        # 其他时间随机
+        # 偏好公共场所和商业区
+        public_locs = [l for l in location_options if "家" not in l]
+        if public_locs and random.random() < 0.6:
+            location = random.choice(public_locs)
+        else:
+            location = random.choice(location_options)
+
+    return {
+        "location": location,
+        "activity": activity,
+        "emotion": emotion,
+    }
+
+
+def _random_conversation(agent1: Resident, agent2: Resident, context: str) -> str:
+    """系统随机生成对话（不调用 LLM）"""
+    template = random.choice(_CONVERSATION_TEMPLATES)
+    lines = []
+    for line in template:
+        lines.append(line.format(
+            a1=agent1.name,
+            a2=agent2.name,
+            act1=agent1.current_activity or "忙活",
+            act2=agent2.current_activity or "忙活",
+        ))
+    return "\n".join(lines)
+
+
+def _random_reflection(agent: Resident, time_str: str) -> str:
+    """系统随机生成反思（不调用 LLM）"""
+    return random.choice(_REFLECTION_TEMPLATES).format(name=agent.name)
+
+
+# ═══════════════════════════════════════════════════════════════
+#  公共接口（自动根据 config.USE_LLM 选择模式）
+# ═══════════════════════════════════════════════════════════════
 
 def generate_conversation(agent1: Resident, agent2: Resident, context: str) -> str:
     """生成两个居民之间的对话"""
+    if not config.USE_LLM:
+        return _random_conversation(agent1, agent2, context)
+
     system_prompt = (
         "你是一个小镇生活模拟器。请根据两个角色的性格和关系，生成一段自然的对话。\n"
         "对话应该简短（3-5轮），符合角色性格，有生活气息。\n"
@@ -33,29 +207,29 @@ def generate_conversation(agent1: Resident, agent2: Resident, context: str) -> s
 
 
 def rate_importance(observation: str, agent: Resident) -> float:
-    """评估一条观察的重要性（1-10）"""
-    system_prompt = (
-        "请给以下事件对这个人的重要性打分（1-10分）。\n"
-        "1分表示完全不重要（如：看到一片树叶落下）\n"
-        "5分表示一般重要（如：和邻居打了个招呼）\n"
-        "10分表示非常重要（如：得知亲人生病）\n"
-        "只输出一个数字，不要其他内容。"
-    )
-    user_prompt = (
-        f"人物: {agent.name}（{agent.occupation}）\n"
-        f"事件: {observation}"
-    )
+    """评估一条观察的重要性（1-10）— 使用规则而非 LLM，节省 API 配额"""
+    # 关键词匹配打分，避免浪费 LLM 调用
+    high_keywords = ["生病", "受伤", "吵架", "哭", "紧急", "出事", "危险", "失火"]
+    mid_keywords = ["聊天", "对话", "帮忙", "拜访", "约", "邀请", "一起"]
+    low_keywords = ["闲逛", "散步", "路过", "看到", "发呆"]
 
-    try:
-        result = llm_call_sync(system_prompt, user_prompt)
-        score = float(result.strip())
-        return max(1.0, min(10.0, score))
-    except (ValueError, TypeError):
-        return 5.0
+    for kw in high_keywords:
+        if kw in observation:
+            return 8.0
+    for kw in mid_keywords:
+        if kw in observation:
+            return 6.0
+    for kw in low_keywords:
+        if kw in observation:
+            return 3.0
+    return 5.0
 
 
 def generate_plan(agent: Resident, time_str: str, period: str, location_options: list[str]) -> dict:
     """生成居民的行动计划"""
+    if not config.USE_LLM:
+        return _random_plan(agent, time_str, period, location_options)
+
     recent_memories = agent.memory.get_recent_observations(5)
     memory_text = agent.memory.format_memories(recent_memories)
 
@@ -94,6 +268,9 @@ def generate_plan(agent: Resident, time_str: str, period: str, location_options:
 
 def generate_reflection(agent: Resident, time_str: str) -> str:
     """生成反思"""
+    if not config.USE_LLM:
+        return _random_reflection(agent, time_str)
+
     recent = agent.memory.get_recent_observations(10)
     memory_text = agent.memory.format_memories(recent)
 
