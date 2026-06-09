@@ -11,8 +11,12 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import Optional
+
+# 设置 HuggingFace 国内镜像，加速 SentenceTransformer 模型下载并防止连接超时挂起
+os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +44,8 @@ except ImportError:
 
 def is_available() -> bool:
     """向量检索是否可用"""
-    return _VECTOR_AVAILABLE
+    from config import config
+    return _VECTOR_AVAILABLE and config.USE_VECTOR_STORE
 
 
 def get_chroma_client() -> Optional[object]:

@@ -16,12 +16,16 @@
 from __future__ import annotations
 
 import random
+import sys
+import logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 from typing import TypedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from langgraph.graph import StateGraph, END
 
 from town.environment import Town
+logger = logging.getLogger(__name__)
 from town.clock import SimClock
 from agents.resident import Resident
 from agents.profiles import RESIDENT_PROFILES
@@ -118,6 +122,7 @@ class TownSimulation:
         graph.add_edge("reflect", END)
 
         self.graph = graph.compile()
+        logger.info("Supervisor graph compiled")
 
     # ─── Supervisor 节点 ─────────────────────────────────────
 
@@ -129,6 +134,7 @@ class TownSimulation:
         Supervisor 收集所有结果并合并。
         """
         all_events = []
+        logger.info("Dispatching %d agents", len(self.agents))
         location_options = self.town.get_location_names()
 
         # 并行运行所有居民的 Sub-graph
@@ -147,9 +153,11 @@ class TownSimulation:
                 agent_name = futures[future]
                 try:
                     result = future.result()
+                    logger.debug("Agent %s completed", agent_name)
                     all_events.extend(result.get("events", []))
                 except Exception as e:
                     all_events.append(f"[错误] {agent_name} 执行失败: {e}")
+                    logger.error("Agent %s failed: %s", agent_name, e)
 
         return {
             "events": state["events"] + all_events,
@@ -162,6 +170,7 @@ class TownSimulation:
         }
 
     def _interact_node(self, state: SimulationState) -> dict:
+        logger.info("Starting interaction node")
         """Supervisor 交互节点：处理同一地点居民的对话
 
         只有 Supervisor 知道全局位置信息，
@@ -209,7 +218,9 @@ class TownSimulation:
                     )
 
                     events.append(f"[对话] {pair[0]}和{pair[1]}在{loc_name}聊天")
+                    logger.debug("Conversation between %s and %s at %s", pair[0], pair[1], loc_name)
 
+        logger.info("Interaction node produced %d events", len(events))
         return {
             "events": state["events"] + events,
             "day_log": state["day_log"] + events,
@@ -217,6 +228,7 @@ class TownSimulation:
         }
 
     def _advance_time_node(self, state: SimulationState) -> dict:
+        logger.info("Advancing time node")
         """Supervisor 时间节点：推进模拟时钟"""
         self.clock.tick()
 
@@ -224,6 +236,7 @@ class TownSimulation:
         for event in state["events"]:
             self.town.add_event(self.clock.time_str, event)
 
+        logger.info("Time advanced to %s (%s)", self.clock.time_str, self.clock.period)
         return {
             "step": state["step"] + 1,
             "day": self.clock.day,
@@ -239,6 +252,7 @@ class TownSimulation:
         }
 
     def _reflect_node(self, state: SimulationState) -> dict:
+        logger.info("Starting reflection node")
         """Supervisor 反思节点：一天结束，协调所有居民反思"""
         events = []
 
@@ -260,6 +274,7 @@ class TownSimulation:
                         reflection, importance, self.clock.time_str
                     )
                     events.append(f"[反思] {name}: {reflection}")
+                    logger.debug("Reflection by %s: %s", name, reflection)
                 except Exception as e:
                     events.append(f"[错误] {name} 反思失败: {e}")
 

@@ -17,7 +17,7 @@ def run_console():
     from simulation.engine import TownSimulation
 
     print("=" * 60)
-    print("🏘️  桃源镇 · AI 小镇模拟")
+    print("--- Step mode started ---")
     print("=" * 60)
 
     sim = TownSimulation()

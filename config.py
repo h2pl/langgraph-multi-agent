@@ -3,12 +3,18 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# 确保 HuggingFace 镜像源在最开始就被设置在环境变量中，防止其他库提前加载导致失效
+os.environ["HF_ENDPOINT"] = os.getenv("HF_ENDPOINT", "https://hf-mirror.com")
+
 
 class Config:
     # LLM 配置
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
     OPENAI_API_BASE: str = os.getenv("OPENAI_API_BASE", "")
     MODEL_NAME: str = os.getenv("MODEL_NAME", "gpt-4o-mini")
+
+    # 向量存储配置
+    USE_VECTOR_STORE: bool = os.getenv("USE_VECTOR_STORE", "true").lower() == "true"
 
     # 模拟配置
     SIMULATION_SPEED: int = int(os.getenv("SIMULATION_SPEED", "1"))
