@@ -81,6 +81,12 @@ class TownSimulation:
         self.graph = None
         self.all_events: list[dict] = []
 
+        # 微步状态：跟踪当前小时内各居民的 perceive/plan/act 进度
+        self._micro_state: dict | None = None  # 当前微步上下文
+        self._micro_agent_idx: int = 0         # 当前居民序号
+        self._micro_phase_idx: int = 0         # 当前阶段序号 (0=perceive,1=plan,2=act)
+        self._micro_hour_phase: str = "dispatch"  # dispatch / interact / advance / done
+
         self._init_residents()
         self._build_supervisor_graph()
 
@@ -134,47 +140,85 @@ class TownSimulation:
 
     # ─── Supervisor 节点 ─────────────────────────────────────
 
-    def _dispatch_agents_node(self, state: SimulationState) -> dict:
-        """Supervisor 核心：并行调度所有居民的独立 Sub-graph
+    def _dispatch_agents_node(self, state: SimulationState,
+                              on_micro_step=None) -> dict:
+        """Supervisor 核心：调度所有居民的独立 Sub-graph
 
         每个 ResidentAgent 的 Sub-graph 会独立执行:
           perceive → plan → act
         Supervisor 收集所有结果并合并。
+
+        Args:
+            on_micro_step: 可选回调 (agent_name, phase, stamped_new_events,
+                           agent_dict, location_states)
+                           每个居民的每个阶段完成后立即调用，用于实时推送。
+                           提供此回调时居民串行执行以保证推送顺序。
         """
         all_events = []
         logger.info("Dispatching %d agents", len(self.agents))
         location_options = self.town.get_location_names()
 
-        # 并行运行所有居民的 Sub-graph
-        # 并发上限交给 llm_utils 的信号量去控流（信号量保护 LLM 调用本身），
-        # 这里只需要给一个合理的线程数即可，避免双重节流导致串行。
-        max_workers = max(2, len(self.agents))
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {
-                executor.submit(
-                    agent.run,
-                    self.clock.time_str,
-                    self.clock.period,
-                    location_options,
-                ): name
-                for name, agent in self.agents.items()
-            }
-
-            for future in as_completed(futures):
-                agent_name = futures[future]
+        if on_micro_step:
+            # 串行逐步执行：每个居民的每个阶段都回调
+            for name, agent in self.agents.items():
                 try:
-                    result = future.result()
-                    logger.debug("Agent %s completed", agent_name)
-                    all_events.extend(result.get("events", []))
-                except Exception as e:
-                    all_events.append(f"[错误] {agent_name} 执行失败: {e}")
-                    logger.error("Agent %s failed: %s", agent_name, e)
+                    def _make_phase_cb(agent_name_bound):
+                        def _phase_cb(agent_name, phase, new_events, agent_state):
+                            stamped = [_format_event(self.clock.time_str, e)
+                                       for e in new_events]
+                            on_micro_step(
+                                agent_name, phase, stamped,
+                                self.residents[agent_name].to_dict(),
+                                {loc: self.town.get_agents_at(loc)
+                                 for loc in self.town.get_location_names()},
+                            )
+                        return _phase_cb
 
-        # 统一为事件加上本轮模拟时间戳，便于日志展示
-        stamped = [_format_event(self.clock.time_str, e) for e in all_events]
+                    logger.debug("Running agent %s with callbacks", name)
+                    result = agent.run_with_callbacks(
+                        self.clock.time_str, self.clock.period,
+                        location_options, on_phase_done=_make_phase_cb(name),
+                    )
+                    agent_events = result.get("events", [])
+                    stamped_agent = [_format_event(self.clock.time_str, e)
+                                     for e in agent_events]
+                    all_events.extend(stamped_agent)
+                    logger.debug("Agent %s completed with %d events", name, len(agent_events))
+                except Exception as e:
+                    err = _format_event(self.clock.time_str,
+                                        f"[错误] {name} 执行失败: {e}")
+                    all_events.append(err)
+                    logger.error("Agent %s failed: %s", name, e, exc_info=True)
+        else:
+            # 并行执行（无实时推送需求时更快）
+            max_workers = max(2, len(self.agents))
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {
+                    executor.submit(
+                        agent.run,
+                        self.clock.time_str,
+                        self.clock.period,
+                        location_options,
+                    ): name
+                    for name, agent in self.agents.items()
+                }
+                for future in as_completed(futures):
+                    agent_name = futures[future]
+                    try:
+                        result = future.result()
+                        agent_events = result.get("events", [])
+                        stamped = [_format_event(self.clock.time_str, e)
+                                   for e in agent_events]
+                        all_events.extend(stamped)
+                    except Exception as e:
+                        err = _format_event(self.clock.time_str,
+                                            f"[错误] {agent_name} 执行失败: {e}")
+                        all_events.append(err)
+                        logger.error("Agent %s failed: %s", agent_name, e)
+
         return {
-            "events": state["events"] + stamped,
-            "day_log": state["day_log"] + stamped,
+            "events": state["events"] + all_events,
+            "day_log": state["day_log"] + all_events,
             "agent_states": {n: r.to_dict() for n, r in self.residents.items()},
             "location_states": {
                 loc: self.town.get_agents_at(loc)
@@ -182,12 +226,17 @@ class TownSimulation:
             },
         }
 
-    def _interact_node(self, state: SimulationState) -> dict:
+    def _interact_node(self, state: SimulationState,
+                       on_conversation_done=None) -> dict:
         logger.info("Starting interaction node")
         """Supervisor 交互节点：处理同一地点居民的对话
 
         只有 Supervisor 知道全局位置信息，
         所以由 Supervisor 负责协调居民之间的交互。
+
+        Args:
+            on_conversation_done: 可选回调 (event_text, conversation_dict)
+                                  每段对话完成后立即调用，用于实时推送。
         """
         events = []
         conversations = []
@@ -216,12 +265,13 @@ class TownSimulation:
                 )
 
                 conversation = generate_conversation(a1, a2, context)
-                conversations.append({
+                conv_dict = {
                     "time": self.clock.time_str,
                     "location": loc_name,
                     "participants": [a1_name, a2_name],
                     "content": conversation,
-                })
+                }
+                conversations.append(conv_dict)
 
                 # 写入双方记忆
                 conv_summary = f"在{loc_name}和{a2.name}聊了天"
@@ -237,11 +287,15 @@ class TownSimulation:
                     self.clock.time_str,
                 )
 
-                events.append(_format_event(
+                event_text = _format_event(
                     self.clock.time_str,
                     f"[对话] {a1_name}和{a2_name}在{loc_name}聊天",
-                ))
+                )
+                events.append(event_text)
                 logger.debug("Conversation between %s and %s at %s", a1_name, a2_name, loc_name)
+
+                if on_conversation_done:
+                    on_conversation_done(event_text, conv_dict)
 
         logger.info("Interaction node produced %d events", len(events))
         # 事件已经在生成时直接加了时间戳
@@ -376,6 +430,7 @@ class TownSimulation:
 
     def run_step(self) -> dict:
         """运行单步（用于 Web 实时展示）"""
+        self._reset_micro()  # 跳过微步，直接执行完整一小时
         state = self.get_initial_state()
 
         # 如果已经到达 22:00（day_end），单步时直接走 reflect + 翻页
@@ -389,6 +444,156 @@ class TownSimulation:
         state = {**state, **self._advance_time_node(state)}
 
         return state
+
+    def _reset_micro(self):
+        """重置微步状态，准备新的一小时"""
+        self._micro_state = None
+        self._micro_agent_idx = 0
+        self._micro_phase_idx = 0
+        self._micro_hour_phase = "dispatch"
+
+    def get_micro_info(self) -> dict:
+        """获取当前微步进度信息"""
+        agent_names = list(self.agents.keys())
+        phases = ResidentAgent.PHASES
+        if self._micro_hour_phase == "dispatch" and self._micro_agent_idx < len(agent_names):
+            current_agent = agent_names[self._micro_agent_idx]
+            current_phase = phases[self._micro_phase_idx] if self._micro_phase_idx < len(phases) else "done"
+        else:
+            current_agent = None
+            current_phase = self._micro_hour_phase
+        return {
+            "hour_phase": self._micro_hour_phase,
+            "agent_idx": self._micro_agent_idx,
+            "agent_count": len(agent_names),
+            "agent_name": current_agent,
+            "phase_idx": self._micro_phase_idx,
+            "phase_name": current_phase,
+            "sim_time": self.clock.time_str,
+            "sim_period": self.clock.period,
+        }
+
+    def micro_step(self) -> dict:
+        """执行一个微步：当前居民的下一个 perceive/plan/act 阶段
+
+        返回 dict 包含:
+            agent_name, phase, events (仅本步新增), agent_state, location_states,
+            micro_info (进度信息), finished_hour (本小时是否全部完成)
+        """
+        agent_names = list(self.agents.keys())
+        phases = ResidentAgent.PHASES
+        location_options = self.town.get_location_names()
+
+        # 如果已到 22:00，执行反思
+        if self.clock.is_day_end:
+            state = self.get_initial_state()
+            result = self._reflect_node(state)
+            state = {**state, **result}
+            self._reset_micro()
+            return {
+                "agent_name": None,
+                "phase": "reflect",
+                "events": state.get("events", []),
+                "agent_state": None,
+                "location_states": {loc: self.town.get_agents_at(loc)
+                                    for loc in location_options},
+                "agent_states": {n: r.to_dict() for n, r in self.residents.items()},
+                "micro_info": self.get_micro_info(),
+                "finished_hour": True,
+            }
+
+        # 阶段: dispatch（逐居民逐阶段）
+        if self._micro_hour_phase == "dispatch":
+            if self._micro_agent_idx >= len(agent_names):
+                # 所有居民 dispatch 完成，进入 interact
+                self._micro_hour_phase = "interact"
+                return self.micro_step()  # 递归进入下一阶段
+
+            agent_name = agent_names[self._micro_agent_idx]
+            agent = self.agents[agent_name]
+
+            # 初始化该居民的子图状态
+            if self._micro_phase_idx == 0:
+                self._micro_state = agent._make_initial_state(
+                    self.clock.time_str, self.clock.period, location_options
+                )
+
+            phase = phases[self._micro_phase_idx]
+            prev_count = len(self._micro_state.get("events", []))
+            self._micro_state = agent.run_phase(phase, self._micro_state)
+            new_events = self._micro_state.get("events", [])[prev_count:]
+
+            # 加时间戳
+            stamped = [_format_event(self.clock.time_str, e) for e in new_events]
+
+            result = {
+                "agent_name": agent_name,
+                "phase": phase,
+                "events": stamped,
+                "agent_state": self.residents[agent_name].to_dict(),
+                "location_states": {loc: self.town.get_agents_at(loc)
+                                    for loc in location_options},
+                "agent_states": None,
+                "micro_info": None,
+                "finished_hour": False,
+            }
+
+            # 推进到下一阶段
+            self._micro_phase_idx += 1
+            if self._micro_phase_idx >= len(phases):
+                # 该居民完成，下一个居民
+                self._micro_agent_idx += 1
+                self._micro_phase_idx = 0
+                self._micro_state = None
+
+            result["micro_info"] = self.get_micro_info()
+            return result
+
+        # 阶段: interact
+        if self._micro_hour_phase == "interact":
+            state = self.get_initial_state()
+            interact_result = self._interact_node(state)
+            events = interact_result.get("events", [])[len(state["events"]):]
+            conversations = interact_result.get("conversations", [])[len(state.get("conversations", [])):]
+            self._micro_hour_phase = "advance"
+            return {
+                "agent_name": None,
+                "phase": "interact",
+                "events": events,
+                "conversations": conversations,
+                "agent_state": None,
+                "location_states": {loc: self.town.get_agents_at(loc)
+                                    for loc in location_options},
+                "agent_states": None,
+                "micro_info": self.get_micro_info(),
+                "finished_hour": False,
+            }
+
+        # 阶段: advance
+        if self._micro_hour_phase == "advance":
+            state = self.get_initial_state()
+            advance_result = self._advance_time_node(state)
+            events = advance_result.get("events", [])[len(state["events"]):]
+            self._reset_micro()
+            return {
+                "agent_name": None,
+                "phase": "advance",
+                "events": events,
+                "agent_state": None,
+                "location_states": {loc: self.town.get_agents_at(loc)
+                                    for loc in location_options},
+                "agent_states": {n: r.to_dict() for n, r in self.residents.items()},
+                "micro_info": self.get_micro_info(),
+                "finished_hour": True,
+            }
+
+        # fallback
+        self._reset_micro()
+        return {
+            "agent_name": None, "phase": "unknown", "events": [],
+            "agent_state": None, "location_states": {}, "agent_states": None,
+            "micro_info": self.get_micro_info(), "finished_hour": True,
+        }
 
     def end_day(self) -> dict:
         """Web 单步模式下收尾一天：触发 reflect 并翻页"""

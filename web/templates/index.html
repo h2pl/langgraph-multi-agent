@@ -180,6 +180,11 @@
             position: relative;
         }
 
+        .btn-micro {
+            background: linear-gradient(135deg, #43e97b, #38f9d7);
+            color: #333;
+        }
+
         .btn-step {
             background: linear-gradient(135deg, #667eea, #764ba2);
             color: white;
@@ -354,6 +359,22 @@
             background: rgba(253, 160, 133, 0.08);
         }
 
+        .event-item.llm-call {
+            border-left-color: #ffd700;
+            background: rgba(255, 215, 0, 0.10);
+        }
+        .event-item.llm-call .llm-badge {
+            display: inline-block;
+            background: linear-gradient(135deg, #ffd700, #ffb700);
+            color: #333;
+            font-size: 10px;
+            font-weight: 700;
+            padding: 1px 6px;
+            border-radius: 4px;
+            margin-left: 6px;
+            vertical-align: middle;
+        }
+
         .event-item.system-msg {
             border-left-color: #667eea;
             background: rgba(102, 126, 234, 0.1);
@@ -450,6 +471,7 @@
     </div>
 
     <div class="controls">
+        <button class="btn-micro" onclick="doMicroStep()" id="btnMicro">下一步</button>
         <button class="btn-step" onclick="doStep()" id="btnStep">下一个小时</button>
         <button class="btn-auto" onclick="autoRun()" id="btnAuto">自动运行</button>
         <button class="btn-day" onclick="runDay()" id="btnDay">运行一天</button>
@@ -525,6 +547,7 @@
         let currentSimPeriod = '';
         let elapsedTimer = null;
         let elapsedStart = 0;
+        let streamedEventCount = 0;  // 已通过实时流推送的事件数
 
         function startElapsedTimer() {
             elapsedStart = performance.now();
@@ -636,6 +659,10 @@
                     renderInitialStatus(msg.data);
                 } else if (msg.type === 'progress') {
                     handleProgress(msg.data);
+                } else if (msg.type === 'micro_step') {
+                    handleMicroStep(msg.data);
+                } else if (msg.type === 'conversation_event') {
+                    handleConversationEvent(msg.data);
                 }
             };
 
@@ -708,6 +735,90 @@
             }
         }
 
+        const LLM_PHASES = new Set(['plan']);
+        const LLM_EVENT_TAGS = ['[计划]', '[对话]', '[反思]'];
+
+        function isLlmEvent(text) {
+            return LLM_EVENT_TAGS.some(tag => text.includes(tag));
+        }
+
+        function handleMicroStep(data) {
+            // 实时更新单个居民单阶段的事件、卡片、地图
+            const isLlmPhase = LLM_PHASES.has(data.phase);
+            if (data.events && data.events.length > 0) {
+                appendEvents(data.events, isLlmPhase);
+                scrollEventLogToTop();
+                streamedEventCount += data.events.length;
+            }
+            if (data.agent_state && data.agent_name) {
+                updateSingleResident(data.agent_name, data.agent_state);
+            }
+            if (data.location_states) {
+                updateMap(data.location_states);
+            }
+            // 更新状态栏显示当前阶段
+            if (data.agent_name && data.phase_label) {
+                const llmTag = isLlmPhase ? ' 🤖LLM' : '';
+                setStatus('busy', `${data.agent_name} · ${data.phase_label}${llmTag}`);
+            }
+        }
+
+        function handleConversationEvent(data) {
+            // 实时追加对话事件和内容
+            if (data.event) {
+                appendEvents([data.event]);
+                streamedEventCount += 1;
+            }
+            if (data.conversation) {
+                appendConversations([data.conversation]);
+                streamedEventCount += 1;
+            }
+            scrollEventLogToTop();
+        }
+
+        function scrollEventLogToTop() {
+            const container = document.getElementById('eventLog');
+            container.scrollTop = 0;
+        }
+
+        function updateSingleResident(name, info) {
+            const container = document.getElementById('residentList');
+            const color = RESIDENT_COLORS[name] || '#667eea';
+
+            // 查找已有卡片
+            let card = null;
+            for (const c of container.children) {
+                const nameEl = c.querySelector('.resident-name');
+                if (nameEl && nameEl.textContent === name) {
+                    card = c;
+                    break;
+                }
+            }
+
+            const html = `
+                <div class="resident-name" style="color:${color}">${name}</div>
+                <div class="resident-info">
+                    ${info.occupation || info.age + '岁'}<br>
+                    📍 ${info.current_location}<br>
+                    🎯 ${info.current_activity}
+                </div>
+                <span class="resident-emotion">${info.current_emotion || '平静'}</span>
+            `;
+
+            if (card) {
+                card.innerHTML = html;
+                // 闪烁高亮
+                card.style.transition = 'box-shadow 0.3s';
+                card.style.boxShadow = `0 0 12px ${color}88`;
+                setTimeout(() => { card.style.boxShadow = ''; }, 800);
+            } else {
+                card = document.createElement('div');
+                card.className = 'resident-card';
+                card.innerHTML = html;
+                container.appendChild(card);
+            }
+        }
+
         // ─── 渲染 ───
         function renderInitialStatus(data) {
             currentSimTime = data.clock.time_str || '';
@@ -742,11 +853,16 @@
             if (data.location_states) {
                 updateMap(data.location_states);
             }
-            if (data.events) {
-                appendEvents(data.events);
-            }
-            if (data.conversations && data.conversations.length > 0) {
-                appendConversations(data.conversations);
+            // 如果事件已通过实时流推送，跳过重复追加
+            if (streamedEventCount > 0) {
+                streamedEventCount = 0;
+            } else {
+                if (data.events) {
+                    appendEvents(data.events);
+                }
+                if (data.conversations && data.conversations.length > 0) {
+                    appendConversations(data.conversations);
+                }
             }
         }
 
@@ -815,14 +931,16 @@
             }
         }
 
-        function appendEvents(events) {
+        function appendEvents(events, forceIsLlm) {
             const container = document.getElementById('eventLog');
 
             for (const event of events) {
                 const div = document.createElement('div');
                 let cls = 'event-item';
+                const llm = forceIsLlm || isLlmEvent(event);
                 if (event.includes('[对话]')) cls += ' conversation';
                 if (event.includes('[反思]')) cls += ' reflection';
+                if (llm) cls += ' llm-call';
 
                 let text = event;
                 const hasStamp = /^\[\d{2}:\d{2}\]/.test(event);
@@ -833,7 +951,11 @@
                 }
 
                 div.className = cls;
-                div.textContent = text;
+                if (llm) {
+                    div.innerHTML = escapeHtml(text) + '<span class="llm-badge">LLM</span>';
+                } else {
+                    div.textContent = text;
+                }
                 container.prepend(div);
             }
 
@@ -842,12 +964,18 @@
             }
         }
 
+        function escapeHtml(str) {
+            const d = document.createElement('div');
+            d.textContent = str;
+            return d.innerHTML;
+        }
+
         function appendConversations(conversations) {
             const container = document.getElementById('eventLog');
 
             for (const conv of conversations) {
                 const div = document.createElement('div');
-                div.className = 'event-item conversation';
+                div.className = 'event-item conversation llm-call';
                 let stamp = '';
                 if (conv.time) {
                     const parts = String(conv.time).split(' ');
@@ -855,7 +983,7 @@
                 }
                 const stampStr = stamp ? `[${stamp}] ` : '';
                 div.innerHTML = `
-                    <strong>💬 ${stampStr}${conv.participants.join(' & ')} 在${conv.location}的对话</strong>
+                    <strong>💬 ${stampStr}${conv.participants.join(' & ')} 在${conv.location}的对话</strong><span class="llm-badge">LLM</span>
                     <div class="conversation-content">${conv.content}</div>
                 `;
                 container.prepend(div);
@@ -874,6 +1002,43 @@
             }
         }
 
+        const MICRO_PHASE_LABELS = {
+            perceive: '感知', plan: '计划', act: '行动',
+            interact: '交互', advance: '推进时间', reflect: '反思'
+        };
+
+        async function doMicroStep() {
+            setButtonsDisabled(true);
+            setStatus('busy', '正在执行微步...');
+
+            try {
+                const res = await fetch('/api/micro_step', { method: 'POST' });
+                const data = await res.json();
+                const r = data.result;
+                const phaseLabel = MICRO_PHASE_LABELS[r.phase] || r.phase;
+                const agentLabel = r.agent_name ? `${r.agent_name}` : '';
+                const isLlm = LLM_PHASES.has(r.phase);
+                const llmTag = isLlm ? ' 🤖LLM' : '';
+                const info = r.micro_info || {};
+
+                if (r.finished_hour) {
+                    setStatus('done', `✅ ${agentLabel} ${phaseLabel}${llmTag} — 本小时完成`);
+                    setTimeout(() => setStatus('', '就绪'), 1500);
+                } else {
+                    const nextAgent = info.agent_name || '';
+                    const nextPhase = MICRO_PHASE_LABELS[info.phase_name] || info.phase_name || '';
+                    const nextIsLlm = LLM_PHASES.has(info.phase_name);
+                    const nextLlmTag = nextIsLlm ? ' 🤖' : '';
+                    setStatus('done', `✅ ${agentLabel} ${phaseLabel}${llmTag} → 下一步: ${nextAgent} ${nextPhase}${nextLlmTag}`);
+                }
+            } catch (e) {
+                console.error(e);
+                setStatus('error', '微步执行出错: ' + e.message);
+            }
+
+            setButtonsDisabled(false);
+        }
+
         async function doStep() {
             setButtonsDisabled(true);
             setStatus('busy', '正在模拟下一个小时...');
@@ -885,14 +1050,19 @@
             try {
                 const res = await fetch('/api/step', { method: 'POST' });
                 const data = await res.json();
-                updateUI(data.state);
+                if (data.status === 'error') {
+                    setStatus('error', '执行出错: ' + data.message);
+                    addSystemLog('执行出错: ' + data.message);
+                } else {
+                    updateUI(data.state);
+                }
             } catch (e) {
                 console.error(e);
                 setStatus('error', '执行出错: ' + e.message);
                 addSystemLog('执行出错: ' + e.message);
-                stopElapsedTimer();
             }
 
+            stopElapsedTimer();
             setButtonsDisabled(false);
         }
 
@@ -910,6 +1080,7 @@
 
             isRunning = true;
             document.getElementById('btnAuto').textContent = '暂停';
+            document.getElementById('btnMicro').disabled = true;
             document.getElementById('btnStep').disabled = true;
             document.getElementById('btnDay').disabled = true;
             startElapsedTimer();
@@ -1011,6 +1182,7 @@
         }
 
         function setButtonsDisabled(disabled) {
+            document.getElementById('btnMicro').disabled = disabled;
             document.getElementById('btnStep').disabled = disabled;
             document.getElementById('btnReset').disabled = disabled;
             // Don't disable Day button when it's in pause mode (isDayRunning)

@@ -90,6 +90,54 @@ class ResidentAgent:
         )
         return self.graph.invoke(initial_state)
 
+    def _make_initial_state(self, time_str: str, period: str,
+                            location_options: list[str]) -> dict:
+        """创建初始状态字典"""
+        return dict(
+            resident_name=self.resident.name,
+            time_str=time_str,
+            period=period,
+            current_location=self.resident.current_location,
+            nearby_agents=self.town.get_nearby_agents(
+                self.resident.name, self.resident.current_location
+            ),
+            observation="",
+            planned_location=self.resident.current_location,
+            planned_activity=self.resident.current_activity,
+            planned_emotion=self.resident.current_emotion,
+            location_options=location_options,
+            events=[],
+        )
+
+    PHASES = ["perceive", "plan", "act"]
+
+    def run_phase(self, phase: str, state: dict) -> dict:
+        """运行单个阶段，返回更新后的状态"""
+        fn = {"perceive": self._perceive, "plan": self._plan, "act": self._act}[phase]
+        result = fn(state)
+        return {**state, **result}
+
+    def run_with_callbacks(self, time_str: str, period: str,
+                           location_options: list[str],
+                           on_phase_done=None) -> dict:
+        """逐步执行 perceive → plan → act，每步回调通知
+
+        Args:
+            on_phase_done: 可选回调 (agent_name, phase, new_events, agent_state)
+                          每个阶段完成后调用。new_events 仅包含该阶段新增的事件。
+        """
+        state = self._make_initial_state(time_str, period, location_options)
+
+        for phase in self.PHASES:
+            prev_event_count = len(state.get("events", []))
+            state = self.run_phase(phase, state)
+            new_events = state.get("events", [])[prev_event_count:]
+
+            if on_phase_done:
+                on_phase_done(self.resident.name, phase, new_events, state)
+
+        return state
+
     # ─── 子图节点 ────────────────────────────────────────────
 
     def _perceive(self, state: ResidentState) -> dict:
