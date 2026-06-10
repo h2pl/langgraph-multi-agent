@@ -27,6 +27,9 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 simulation: TownSimulation | None = None
 connected_clients: list[WebSocket] = []
 
+# 用于取消 run_day 的事件
+_cancel_day = asyncio.Event()
+
 
 def get_simulation() -> TownSimulation:
     global simulation
@@ -35,12 +38,12 @@ def get_simulation() -> TownSimulation:
     return simulation
 
 
-async def broadcast_progress(phase: str, detail: str = ""):
+async def broadcast_progress(phase: str, detail: str = "", extra: dict | None = None):
     """向所有 WebSocket 客户端广播进度消息"""
-    message = json.dumps({
-        "type": "progress",
-        "data": {"phase": phase, "detail": detail}
-    }, ensure_ascii=False)
+    payload: dict = {"phase": phase, "detail": detail}
+    if extra:
+        payload.update(extra)
+    message = json.dumps({"type": "progress", "data": payload}, ensure_ascii=False)
 
     dead_clients = []
     for client in connected_clients:
@@ -54,30 +57,79 @@ async def broadcast_progress(phase: str, detail: str = ""):
 
 
 async def run_step_with_progress(sim: TownSimulation) -> dict:
-    """运行单步并通过 WebSocket 发送进度"""
+    """运行单步并通过 WebSocket 发送进度（含已用时间）"""
+    import time as _time
+    t0 = _time.monotonic()
     state = sim.get_initial_state()
+
+    # 记住本步模拟的时间（tick 前），确保和事件时间戳一致
+    step_time = sim.clock.time_str
+    step_period = sim.clock.period
+
+    def _elapsed() -> str:
+        s = _time.monotonic() - t0
+        return f"{s:.1f}s"
+
+    # 如果已到 22:00（day_end），执行反思 + 翻页到下一天
+    if sim.clock.is_day_end:
+        await broadcast_progress("dispatch", f"正在进行日终反思...",
+                                 {"elapsed": "0.0s"})
+        state = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: {**state, **sim._reflect_node(state)}
+        )
+        # reflect 后居民已回家、时钟已翻页，刷新位置数据
+        state["agent_states"] = {n: r.to_dict() for n, r in sim.residents.items()}
+        state["location_states"] = {
+            loc: sim.town.get_agents_at(loc)
+            for loc in sim.town.get_location_names()
+        }
+        state["step_time"] = step_time
+        state["step_period"] = step_period
+        await broadcast_progress("step_done", f"反思完成，进入下一天（耗时 {_elapsed()}）")
+        return state
 
     # 阶段 1: 调度 Agents
     mode_label = "LLM 生成中" if config.USE_LLM else "随机模拟中"
-    await broadcast_progress("dispatch", f"正在调度居民行为 ({mode_label})...")
+    await broadcast_progress("dispatch", f"正在调度居民行为 ({mode_label})...",
+                             {"elapsed": "0.0s"})
     state = await asyncio.get_event_loop().run_in_executor(
         None, lambda: {**state, **sim._dispatch_agents_node(state)}
     )
 
     # 阶段 2: 交互
-    await broadcast_progress("interact", "正在处理居民交互...")
+    await broadcast_progress("interact", f"正在处理居民交互...",
+                             {"elapsed": _elapsed()})
     state = await asyncio.get_event_loop().run_in_executor(
         None, lambda: {**state, **sim._interact_node(state)}
     )
 
     # 阶段 3: 推进时间
-    await broadcast_progress("advance", "正在推进时间...")
+    await broadcast_progress("advance", f"正在推进时间...",
+                             {"elapsed": _elapsed()})
     state = await asyncio.get_event_loop().run_in_executor(
         None, lambda: {**state, **sim._advance_time_node(state)}
     )
 
-    await broadcast_progress("done", "步骤完成")
+    # 将本步模拟时间写入 state，便于前端显示
+    state["step_time"] = step_time
+    state["step_period"] = step_period
+
+    await broadcast_progress("step_done", f"步骤完成（耗时 {_elapsed()}）")
     return state
+
+
+def _build_step_data(state: dict, sim: TownSimulation) -> dict:
+    """构建发给前端的 step_update 数据，使用 step_time 保证时间一致性"""
+    return {
+        "time": state.get("step_time", state["time_str"]),
+        "sim_time": state.get("step_time", sim.clock.time_str),
+        "sim_period": state.get("step_period", sim.clock.period),
+        "sim_day": sim.clock.day,
+        "events": state["events"][-10:],
+        "conversations": state.get("conversations", []),
+        "agent_states": state["agent_states"],
+        "location_states": state["location_states"],
+    }
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -103,19 +155,8 @@ async def run_step():
     state = await run_step_with_progress(sim)
 
     # 通知所有 WebSocket 客户端
-    message = json.dumps({
-        "type": "step_update",
-        "data": {
-            "time": state["time_str"],
-            "sim_time": sim.clock.time_str,
-            "sim_period": sim.clock.period,
-            "sim_day": sim.clock.day,
-            "events": state["events"][-10:],
-            "conversations": state.get("conversations", []),
-            "agent_states": state["agent_states"],
-            "location_states": state["location_states"],
-        }
-    }, ensure_ascii=False)
+    step_data = _build_step_data(state, sim)
+    message = json.dumps({"type": "step_update", "data": step_data}, ensure_ascii=False)
 
     for client in connected_clients:
         try:
@@ -128,21 +169,101 @@ async def run_step():
 
 @app.post("/api/run_day")
 async def run_day():
-    """运行一整天"""
+    """逐步运行一整天（支持暂停）"""
+    import time as _time
     sim = get_simulation()
-    await broadcast_progress("day_start", "开始运行一整天的模拟...")
+    _cancel_day.clear()
+    t0 = _time.monotonic()
 
-    state = await asyncio.get_event_loop().run_in_executor(
-        None, sim.run_day
+    all_events: list[str] = []
+    all_conversations: list[dict] = []
+    step = 0
+
+    while not sim.clock.is_day_end:
+        # 检查是否被暂停
+        if _cancel_day.is_set():
+            await broadcast_progress("paused", f"已暂停（第 {step} 步，耗时 {_time.monotonic() - t0:.1f}s）")
+            return {
+                "status": "paused",
+                "step": step,
+                "events": all_events,
+                "conversations": all_conversations,
+            }
+
+        step += 1
+        elapsed = f"{_time.monotonic() - t0:.1f}s"
+        await broadcast_progress("day_running",
+            f"第 {step} 步 · {sim.clock.time_str} · 已用时 {elapsed}",
+            {"elapsed": elapsed, "step": step, "sim_time": sim.clock.time_str})
+
+        state = await run_step_with_progress(sim)
+
+        all_events.extend(state.get("events", []))
+        all_conversations.extend(state.get("conversations", []))
+
+        # 推送本步结果给前端实时更新
+        step_data = _build_step_data(state, sim)
+        update_msg = json.dumps(
+            {"type": "step_update", "data": step_data}, ensure_ascii=False
+        )
+        for client in connected_clients:
+            try:
+                await client.send_text(update_msg)
+            except Exception:
+                pass
+
+        # 短暂延迟，让用户能看到每步的变化（类似自动运行效果）
+        await asyncio.sleep(1.0)
+
+    # 到达 22:00，执行反思并翻页到下一天
+    await broadcast_progress("day_running",
+        f"正在进行日终反思... · 已用时 {_time.monotonic() - t0:.1f}s",
+        {"elapsed": f"{_time.monotonic() - t0:.1f}s"})
+    reflect_state = sim.get_initial_state()
+    reflect_result = await asyncio.get_event_loop().run_in_executor(
+        None, lambda: sim._reflect_node(reflect_state)
     )
+    reflect_state = {**reflect_state, **reflect_result}
+    all_events.extend(reflect_state.get("events", []))
 
-    await broadcast_progress("done", "一天模拟完成")
+    # 推送反思结果到前端
+    reflect_data = {
+        "time": sim.clock.time_str,
+        "sim_time": sim.clock.time_str,
+        "sim_period": sim.clock.period,
+        "sim_day": sim.clock.day,
+        "events": reflect_state.get("events", [])[-10:],
+        "conversations": [],
+        "agent_states": {n: r.to_dict() for n, r in sim.residents.items()},
+        "location_states": {
+            loc: sim.town.get_agents_at(loc)
+            for loc in sim.town.get_location_names()
+        },
+    }
+    reflect_msg = json.dumps(
+        {"type": "step_update", "data": reflect_data}, ensure_ascii=False
+    )
+    for client in connected_clients:
+        try:
+            await client.send_text(reflect_msg)
+        except Exception:
+            pass
+
+    elapsed = f"{_time.monotonic() - t0:.1f}s"
+    await broadcast_progress("done", f"一天模拟完成（耗时 {elapsed}）")
     return {
         "status": "ok",
-        "day": state["day"],
-        "events": state["day_log"],
-        "conversations": state["conversations"],
+        "step": step,
+        "events": all_events,
+        "conversations": all_conversations,
     }
+
+
+@app.post("/api/pause_day")
+async def pause_day():
+    """暂停正在运行的一天模拟"""
+    _cancel_day.set()
+    return {"status": "ok", "message": "暂停信号已发送"}
 
 
 @app.post("/api/reset")
@@ -168,19 +289,11 @@ async def websocket_endpoint(websocket: WebSocket):
             if msg.get("action") == "step":
                 sim = get_simulation()
                 state = await run_step_with_progress(sim)
-                await websocket.send_text(json.dumps({
-                    "type": "step_update",
-                    "data": {
-                        "time": state["time_str"],
-                        "sim_time": sim.clock.time_str,
-                        "sim_period": sim.clock.period,
-                        "sim_day": sim.clock.day,
-                        "events": state["events"][-10:],
-                        "conversations": state.get("conversations", []),
-                        "agent_states": state["agent_states"],
-                        "location_states": state["location_states"],
-                    }
-                }, ensure_ascii=False))
+                step_data = _build_step_data(state, sim)
+                await websocket.send_text(json.dumps(
+                    {"type": "step_update", "data": step_data},
+                    ensure_ascii=False,
+                ))
 
             elif msg.get("action") == "status":
                 sim = get_simulation()
@@ -196,19 +309,11 @@ async def websocket_endpoint(websocket: WebSocket):
                 steps = msg.get("steps", 5)
                 for i in range(steps):
                     state = await run_step_with_progress(sim)
-                    await websocket.send_text(json.dumps({
-                        "type": "step_update",
-                        "data": {
-                            "time": state["time_str"],
-                            "sim_time": sim.clock.time_str,
-                            "sim_period": sim.clock.period,
-                            "sim_day": sim.clock.day,
-                            "events": state["events"][-10:],
-                            "conversations": state.get("conversations", []),
-                            "agent_states": state["agent_states"],
-                            "location_states": state["location_states"],
-                        }
-                    }, ensure_ascii=False))
+                    step_data = _build_step_data(state, sim)
+                    await websocket.send_text(json.dumps(
+                        {"type": "step_update", "data": step_data},
+                        ensure_ascii=False,
+                    ))
                     await asyncio.sleep(1)
 
     except WebSocketDisconnect:
