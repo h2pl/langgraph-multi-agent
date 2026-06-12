@@ -30,6 +30,17 @@ class SimClock:
         self.hour = self.DAY_START_HOUR
         self.day += 1
 
+    def set_time(self, day: int, hour: int) -> None:
+        """将时钟调到指定时间（整点，范围 7~22）"""
+        if not isinstance(day, int) or day < 1:
+            raise ValueError(f"day 必须是 >=1 的整数，当前: {day}")
+        if not isinstance(hour, int) or not (self.DAY_START_HOUR <= hour <= self.DAY_END_HOUR):
+            raise ValueError(
+                f"hour 必须是 {self.DAY_START_HOUR}~{self.DAY_END_HOUR} 的整数，当前: {hour}"
+            )
+        self.day = day
+        self.hour = hour
+
     @property
     def time_str(self) -> str:
         return f"第{self.day}天 {self.hour:02d}:00"

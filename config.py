@@ -28,7 +28,7 @@ class Config:
 
     # Web 配置
     WEB_HOST: str = "127.0.0.1"
-    WEB_PORT: int = 8000
+    WEB_PORT: int = 8001
 
 
 config = Config()
