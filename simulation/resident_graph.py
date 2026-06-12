@@ -119,16 +119,22 @@ class ResidentAgent:
 
     def run_with_callbacks(self, time_str: str, period: str,
                            location_options: list[str],
-                           on_phase_done=None) -> dict:
+                           on_phase_done=None,
+                           on_phase_start=None) -> dict:
         """逐步执行 perceive → plan → act，每步回调通知
 
         Args:
             on_phase_done: 可选回调 (agent_name, phase, new_events, agent_state)
                           每个阶段完成后调用。new_events 仅包含该阶段新增的事件。
+            on_phase_start: 可选回调 (agent_name, phase)
+                           每个阶段开始前调用，用于 UI 显示"正在执行..."。
         """
         state = self._make_initial_state(time_str, period, location_options)
 
         for phase in self.PHASES:
+            if on_phase_start:
+                on_phase_start(self.resident.name, phase)
+
             prev_event_count = len(state.get("events", []))
             state = self.run_phase(phase, state)
             new_events = state.get("events", [])[prev_event_count:]

@@ -105,7 +105,6 @@
             border-radius: 10px;
             font-size: 11px;
             font-weight: 600;
-            margin-left: 8px;
         }
 
         .mode-badge.llm {
@@ -451,12 +450,16 @@
         <div class="time-display" id="timeDisplay">加载中...</div>
     </div>
 
+    <!-- 模式标签 -->
+    <div style="text-align:center; padding:4px 0 0 0;">
+        <span class="mode-badge" id="modeBadge" style="display:none;"></span>
+    </div>
+
     <!-- 状态栏 -->
     <div class="status-bar" id="statusBar">
         <div class="status-dot"></div>
         <div class="status-spinner"></div>
         <span class="status-text" id="statusText">就绪 - 点击按钮开始模拟</span>
-        <span class="mode-badge" id="modeBadge" style="display:none;"></span>
         <span class="elapsed-badge" id="elapsedBadge"></span>
         <div class="step-phases" id="stepPhases" style="display:none;">
             <div class="phase-dot" id="phase1" title="调度居民"></div>
@@ -548,6 +551,7 @@
         let elapsedTimer = null;
         let elapsedStart = 0;
         let streamedEventCount = 0;  // 已通过实时流推送的事件数
+        let nextMicroInfo = null;     // 缓存下一步的 agent/phase 信息
 
         function startElapsedTimer() {
             elapsedStart = performance.now();
@@ -659,6 +663,8 @@
                     renderInitialStatus(msg.data);
                 } else if (msg.type === 'progress') {
                     handleProgress(msg.data);
+                } else if (msg.type === 'phase_start') {
+                    handlePhaseStart(msg.data);
                 } else if (msg.type === 'micro_step') {
                     handleMicroStep(msg.data);
                 } else if (msg.type === 'conversation_event') {
@@ -735,15 +741,26 @@
             }
         }
 
-        const LLM_PHASES = new Set(['plan']);
+        const LLM_PHASES = new Set(['plan', 'reflect']);
         const LLM_EVENT_TAGS = ['[计划]', '[对话]', '[反思]'];
 
         function isLlmEvent(text) {
             return LLM_EVENT_TAGS.some(tag => text.includes(tag));
         }
 
+        function handlePhaseStart(data) {
+            // 阶段开始前的状态显示
+            if (data.agent_name && data.phase_label) {
+                if (data.is_llm) {
+                    setStatus('busy', `${data.agent_name} 正在${data.phase_label} 🤖（调用LLM中）`);
+                } else {
+                    setStatus('busy', `${data.agent_name} 正在${data.phase_label}`);
+                }
+            }
+        }
+
         function handleMicroStep(data) {
-            // 实时更新单个居民单阶段的事件、卡片、地图
+            // 阶段完成后：更新事件、卡片、地图（不覆盖状态栏，phase_start 已设置）
             const isLlmPhase = LLM_PHASES.has(data.phase);
             if (data.events && data.events.length > 0) {
                 appendEvents(data.events, isLlmPhase);
@@ -755,11 +772,6 @@
             }
             if (data.location_states) {
                 updateMap(data.location_states);
-            }
-            // 更新状态栏显示当前阶段
-            if (data.agent_name && data.phase_label) {
-                const llmTag = isLlmPhase ? ' 🤖LLM' : '';
-                setStatus('busy', `${data.agent_name} · ${data.phase_label}${llmTag}`);
             }
         }
 
@@ -1009,7 +1021,17 @@
 
         async function doMicroStep() {
             setButtonsDisabled(true);
-            setStatus('busy', '正在执行微步...');
+            // 显示当前正在执行的 agent/phase
+            if (nextMicroInfo && nextMicroInfo.agent_name) {
+                const pl = MICRO_PHASE_LABELS[nextMicroInfo.phase_name] || nextMicroInfo.phase_name || '';
+                if (LLM_PHASES.has(nextMicroInfo.phase_name)) {
+                    setStatus('busy', `${nextMicroInfo.agent_name} 正在${pl} 🤖（调用LLM中）`);
+                } else {
+                    setStatus('busy', `${nextMicroInfo.agent_name} 正在${pl}`);
+                }
+            } else {
+                setStatus('busy', '正在执行...');
+            }
 
             try {
                 const res = await fetch('/api/micro_step', { method: 'POST' });
@@ -1021,19 +1043,23 @@
                 const llmTag = isLlm ? ' 🤖LLM' : '';
                 const info = r.micro_info || {};
 
+                // 缓存下一步信息
+                nextMicroInfo = info;
+
                 if (r.finished_hour) {
-                    setStatus('done', `✅ ${agentLabel} ${phaseLabel}${llmTag} — 本小时完成`);
+                    setStatus('done', `✅ ${agentLabel} ${phaseLabel} 完成 — 本小时结束`);
+                    nextMicroInfo = null;
                     setTimeout(() => setStatus('', '就绪'), 1500);
                 } else {
                     const nextAgent = info.agent_name || '';
                     const nextPhase = MICRO_PHASE_LABELS[info.phase_name] || info.phase_name || '';
                     const nextIsLlm = LLM_PHASES.has(info.phase_name);
                     const nextLlmTag = nextIsLlm ? ' 🤖' : '';
-                    setStatus('done', `✅ ${agentLabel} ${phaseLabel}${llmTag} → 下一步: ${nextAgent} ${nextPhase}${nextLlmTag}`);
+                    setStatus('done', `✅ ${agentLabel} ${phaseLabel} 完成 → 下一步: ${nextAgent} ${nextPhase}${nextLlmTag}`);
                 }
             } catch (e) {
                 console.error(e);
-                setStatus('error', '微步执行出错: ' + e.message);
+                setStatus('error', '执行出错: ' + e.message);
             }
 
             setButtonsDisabled(false);
@@ -1045,6 +1071,7 @@
             showPhases(true);
             setProgressBar(10);
             startElapsedTimer();
+            await fetch('/api/clear_pause', { method: 'POST' });
             addSystemLog('开始模拟下一个小时');
 
             try {
@@ -1063,39 +1090,47 @@
             }
 
             stopElapsedTimer();
+            showPhases(false);
             setButtonsDisabled(false);
         }
 
         async function autoRun() {
             if (isRunning) {
+                // 发送暂停信号，让后端中断当前 step
+                try {
+                    await fetch('/api/pause_day', { method: 'POST' });
+                } catch (e) {
+                    console.error(e);
+                }
                 isRunning = false;
-                document.getElementById('btnAuto').textContent = '自动运行';
-                setStatus('', '已暂停');
-                setProgressBar(0);
-                stopElapsedTimer();
-                setButtonsDisabled(false);
-                addSystemLog('自动运行已暂停');
+                addSystemLog('正在暂停...');
                 return;
             }
 
             isRunning = true;
-            document.getElementById('btnAuto').textContent = '暂停';
+            document.getElementById('btnAuto').textContent = '⏸ 暂停';
             document.getElementById('btnMicro').disabled = true;
             document.getElementById('btnStep').disabled = true;
             document.getElementById('btnDay').disabled = true;
+            document.getElementById('btnReset').disabled = true;
             startElapsedTimer();
+            await fetch('/api/clear_pause', { method: 'POST' });
             addSystemLog('开始自动运行');
 
             let step = 0;
             while (isRunning) {
                 step++;
-                setStatus('busy', `自动运行中 (第 ${step} 步)...`);
+                setStatus('busy', `自动运行中（第 ${step} 步）...`);
 
                 try {
                     const res = await fetch('/api/step', { method: 'POST' });
                     const data = await res.json();
-                    updateUI(data.state);
-                    await new Promise(r => setTimeout(r, 1000));
+                    if (data.status === 'paused') {
+                        addSystemLog('自动运行已暂停');
+                        break;
+                    }
+                    if (data.state) updateUI(data.state);
+                    await new Promise(r => setTimeout(r, 500));
                 } catch (e) {
                     console.error(e);
                     isRunning = false;
@@ -1104,6 +1139,7 @@
                 }
             }
 
+            isRunning = false;
             document.getElementById('btnAuto').textContent = '自动运行';
             stopElapsedTimer();
             setButtonsDisabled(false);
@@ -1123,6 +1159,7 @@
 
             isDayRunning = true;
             updateDayButton();
+            document.getElementById('btnMicro').disabled = true;
             document.getElementById('btnStep').disabled = true;
             document.getElementById('btnAuto').disabled = true;
             document.getElementById('btnReset').disabled = true;

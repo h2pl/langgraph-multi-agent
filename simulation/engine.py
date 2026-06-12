@@ -141,7 +141,8 @@ class TownSimulation:
     # ─── Supervisor 节点 ─────────────────────────────────────
 
     def _dispatch_agents_node(self, state: SimulationState,
-                              on_micro_step=None) -> dict:
+                              on_micro_step=None,
+                              on_micro_step_start=None) -> dict:
         """Supervisor 核心：调度所有居民的独立 Sub-graph
 
         每个 ResidentAgent 的 Sub-graph 会独立执行:
@@ -153,6 +154,8 @@ class TownSimulation:
                            agent_dict, location_states)
                            每个居民的每个阶段完成后立即调用，用于实时推送。
                            提供此回调时居民串行执行以保证推送顺序。
+            on_micro_step_start: 可选回调 (agent_name, phase)
+                                 每个阶段开始前调用，用于 UI 显示"正在执行..."。
         """
         all_events = []
         logger.info("Dispatching %d agents", len(self.agents))
@@ -174,10 +177,18 @@ class TownSimulation:
                             )
                         return _phase_cb
 
+                    def _make_start_cb(agent_name_bound):
+                        def _start_cb(agent_name, phase):
+                            if on_micro_step_start:
+                                on_micro_step_start(agent_name, phase)
+                        return _start_cb
+
                     logger.debug("Running agent %s with callbacks", name)
                     result = agent.run_with_callbacks(
                         self.clock.time_str, self.clock.period,
-                        location_options, on_phase_done=_make_phase_cb(name),
+                        location_options,
+                        on_phase_done=_make_phase_cb(name),
+                        on_phase_start=_make_start_cb(name),
                     )
                     agent_events = result.get("events", [])
                     stamped_agent = [_format_event(self.clock.time_str, e)
