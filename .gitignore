@@ -22,3 +22,6 @@ venv/
 
 # Vector DB local storage
 data/
+
+# Runtime logs
+*.log
