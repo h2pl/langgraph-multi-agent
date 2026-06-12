@@ -199,7 +199,7 @@
             color: #333;
         }
 
-        .btn-day.pausing {
+        .btn-day.stopping {
             background: linear-gradient(135deg, #f5576c, #f093fb);
             color: white;
         }
@@ -208,6 +208,11 @@
             background: rgba(255,255,255,0.1);
             color: #e0e0e0;
             border: 1px solid rgba(255,255,255,0.2) !important;
+        }
+
+        .btn-set-time {
+            background: linear-gradient(135deg, #a18cd1, #fbc2eb);
+            color: #333;
         }
 
         .controls button:hover:not(:disabled) {
@@ -219,6 +224,78 @@
             opacity: 0.5;
             cursor: not-allowed;
             transform: none;
+        }
+
+        /* ─── 调时间弹窗 ─── */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.6);
+            backdrop-filter: blur(4px);
+            z-index: 1000;
+            align-items: center;
+            justify-content: center;
+        }
+        .modal-overlay.active {
+            display: flex;
+        }
+        .modal-box {
+            background: rgba(30, 25, 60, 0.95);
+            border: 1px solid rgba(255,255,255,0.15);
+            border-radius: 16px;
+            padding: 24px;
+            width: 320px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+        }
+        .modal-box h3 {
+            margin-bottom: 16px;
+            font-size: 18px;
+            color: #e0e0e0;
+        }
+        .modal-box label {
+            display: block;
+            margin-bottom: 4px;
+            font-size: 13px;
+            color: #a0a0c0;
+        }
+        .modal-box input {
+            width: 100%;
+            padding: 10px 12px;
+            margin-bottom: 14px;
+            border-radius: 10px;
+            border: 1px solid rgba(255,255,255,0.15);
+            background: rgba(255,255,255,0.07);
+            color: #e0e0e0;
+            font-size: 14px;
+            outline: none;
+        }
+        .modal-box input:focus {
+            border-color: #a18cd1;
+        }
+        .modal-actions {
+            display: flex;
+            gap: 10px;
+            margin-top: 8px;
+        }
+        .modal-actions button {
+            flex: 1;
+            padding: 10px;
+            border: none;
+            border-radius: 10px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .modal-actions .btn-confirm {
+            background: linear-gradient(135deg, #a18cd1, #fbc2eb);
+            color: #222;
+        }
+        .modal-actions .btn-cancel {
+            background: rgba(255,255,255,0.1);
+            color: #e0e0e0;
+            border: 1px solid rgba(255,255,255,0.2);
         }
 
         /* ─── 主布局 ─── */
@@ -478,7 +555,24 @@
         <button class="btn-step" onclick="doStep()" id="btnStep">下一个小时</button>
         <button class="btn-auto" onclick="autoRun()" id="btnAuto">自动运行</button>
         <button class="btn-day" onclick="runDay()" id="btnDay">运行一天</button>
-        <button class="btn-reset" onclick="resetSim()" id="btnReset">重置</button>
+        <button class="btn-set-time" onclick="openSetTimeModal()" id="btnSetTime">调时间</button>
+        <button class="btn-reset" onclick="resetSim()" id="btnReset">重置到第一天</button>
+        <button class="btn-reset" onclick="resetDay()" id="btnResetDay">重置到今天</button>
+    </div>
+
+    <!-- 调时间弹窗 -->
+    <div class="modal-overlay" id="setTimeModal">
+        <div class="modal-box">
+            <h3>调整模拟时间</h3>
+            <label>第几天（≥1）</label>
+            <input type="number" id="setTimeDay" min="1" value="1">
+            <label>小时（7 ~ 22）</label>
+            <input type="number" id="setTimeHour" min="7" max="22" value="7">
+            <div class="modal-actions">
+                <button class="btn-confirm" onclick="confirmSetTime()">确认</button>
+                <button class="btn-cancel" onclick="closeSetTimeModal()">取消</button>
+            </div>
+        </div>
     </div>
 
     <div class="main-grid">
@@ -541,36 +635,22 @@
             'reset':    { index: 0, label: '正在重置' },
         };
 
-        let isRunning = false;
+        let isStepRunning = false;
+        let isAutoRunning = false;
         let isDayRunning = false;
         let ws = null;
+
+        // 已显示的事件/对话去重缓存（防止多渠道推送导致重复）
+        const displayedEvents = new Set();
+        const displayedConversations = new Set();
+        const MAX_DISPLAYED_CACHE = 2000;
         let useLLM = true;
         let stepCount = 0;
         let currentSimTime = '';
         let currentSimPeriod = '';
-        let elapsedTimer = null;
-        let elapsedStart = 0;
+        let currentSimDay = 1;
         let streamedEventCount = 0;  // 已通过实时流推送的事件数
         let nextMicroInfo = null;     // 缓存下一步的 agent/phase 信息
-
-        function startElapsedTimer() {
-            elapsedStart = performance.now();
-            const badge = document.getElementById('elapsedBadge');
-            badge.style.display = 'inline-block';
-            badge.textContent = '0.0s';
-            clearInterval(elapsedTimer);
-            elapsedTimer = setInterval(() => {
-                const s = ((performance.now() - elapsedStart) / 1000).toFixed(1);
-                badge.textContent = s + 's';
-            }, 100);
-        }
-
-        function stopElapsedTimer() {
-            clearInterval(elapsedTimer);
-            elapsedTimer = null;
-            const badge = document.getElementById('elapsedBadge');
-            setTimeout(() => { badge.style.display = 'none'; }, 2000);
-        }
 
         function pickSimTime(data) {
             return data.sim_time || data.time || currentSimTime;
@@ -669,6 +749,8 @@
                     handleMicroStep(msg.data);
                 } else if (msg.type === 'conversation_event') {
                     handleConversationEvent(msg.data);
+                } else if (msg.type === 'ui_state') {
+                    handleUiState(msg.data);
                 }
             };
 
@@ -689,21 +771,18 @@
             const elapsed = data.elapsed || '';
             const info = PHASE_MAP[phase];
 
-            // 构建状态文本：含耗时
             let statusText = detail || (info ? info.label : '');
             if (elapsed && phase !== 'done' && phase !== 'step_done' && phase !== 'paused') {
                 statusText += ` (${elapsed})`;
             }
 
             if (phase === 'step_done') {
-                // 单步完成 — 如果正在 day-run 或 auto-run，只清除阶段指示，不重置整体状态
-                if (isDayRunning || isRunning) {
+                if (isDayRunning || isAutoRunning) {
                     showPhases(false);
                 } else {
                     setStatus('done', detail || '完成');
                     setProgressBar(100);
                     showPhases(false);
-                    stopElapsedTimer();
                     setTimeout(() => {
                         setStatus('', '就绪');
                         setProgressBar(0);
@@ -713,21 +792,19 @@
                 setStatus('done', detail || '完成');
                 setProgressBar(100);
                 showPhases(false);
-                stopElapsedTimer();
-                isDayRunning = false;
-                updateDayButton();
                 setTimeout(() => {
                     setStatus('', '就绪');
                     setProgressBar(0);
                 }, 1500);
-            } else if (phase === 'paused') {
-                setStatus('done', detail || '已暂停');
+            } else if (phase === 'stopped') {
+                setStatus('done', detail || '已停止');
                 setProgressBar(0);
                 showPhases(false);
-                stopElapsedTimer();
-                isDayRunning = false;
-                updateDayButton();
-                setButtonsDisabled(false);
+                setTimeout(() => {
+                    setStatus('', '就绪');
+                }, 1500);
+            } else if (phase === 'memory_cleared') {
+                addSystemLog(detail || '期间的记忆已被清除');
             } else if (phase === 'day_running') {
                 setStatus('busy', statusText);
                 showPhases(true);
@@ -738,6 +815,53 @@
                 updatePhase(phase);
                 const progressMap = { 'dispatch': 20, 'interact': 60, 'advance': 90 };
                 setProgressBar(progressMap[phase] || 50);
+            }
+        }
+
+        function handleUiState(data) {
+            const wasRunning = isStepRunning || isAutoRunning || isDayRunning;
+
+            const needRefreshDisabled = (
+                data.buttons_disabled !== undefined
+                || data.step_running !== undefined
+                || data.auto_running !== undefined
+                || data.day_running !== undefined
+            );
+
+            if (data.buttons_disabled !== undefined) {
+                setButtonsDisabled(data.buttons_disabled);
+            }
+            if (data.day_running !== undefined) {
+                isDayRunning = data.day_running;
+                updateDayButton();
+            }
+            if (data.auto_running !== undefined) {
+                isAutoRunning = data.auto_running;
+                updateAutoButton();
+            }
+            if (data.step_running !== undefined) {
+                isStepRunning = data.step_running;
+                updateStepButton();
+            }
+            if (data.elapsed !== undefined) {
+                const badge = document.getElementById('elapsedBadge');
+                badge.style.display = 'inline-block';
+                badge.textContent = data.elapsed;
+            }
+
+            // 检测运行→停止转换：所有 running 都变 false 时更新状态栏
+            if (wasRunning && !isStepRunning && !isAutoRunning && !isDayRunning) {
+                setStatus('done', '已停止');
+                showPhases(false);
+                setProgressBar(0);
+                setTimeout(() => setStatus('', '就绪'), 1500);
+            }
+
+            // 运行按钮在 running 时强制可点
+            if (needRefreshDisabled) {
+                if (isStepRunning) document.getElementById('btnStep').disabled = false;
+                if (isAutoRunning) document.getElementById('btnAuto').disabled = false;
+                if (isDayRunning) document.getElementById('btnDay').disabled = false;
             }
         }
 
@@ -755,6 +879,13 @@
                     setStatus('busy', `${data.agent_name} 正在${data.phase_label} 🤖（调用LLM中）`);
                 } else {
                     setStatus('busy', `${data.agent_name} 正在${data.phase_label}`);
+                }
+            } else if (data.phase_label) {
+                // 无具体 agent 的阶段（interact / advance）
+                if (data.is_llm) {
+                    setStatus('busy', `正在${data.phase_label} 🤖（调用LLM中）`);
+                } else {
+                    setStatus('busy', `正在${data.phase_label}`);
                 }
             }
         }
@@ -832,9 +963,10 @@
         }
 
         // ─── 渲染 ───
-        function renderInitialStatus(data) {
+        function renderInitialStatus(data, resetMessage) {
             currentSimTime = data.clock.time_str || '';
             currentSimPeriod = data.clock.period || '';
+            currentSimDay = data.clock.day || 1;
             document.getElementById('timeDisplay').textContent =
                 `${currentSimTime} · ${currentSimPeriod}`;
             renderResidents(data.residents);
@@ -846,7 +978,7 @@
                 updateModeBadge();
             }
 
-            setStatus('done', '数据加载完成');
+            setStatus('done', resetMessage || '数据加载完成');
             setTimeout(() => setStatus('', '就绪'), 1500);
         }
 
@@ -855,6 +987,7 @@
             const simPeriod = pickSimPeriod(data);
             if (simTime) currentSimTime = simTime;
             if (simPeriod) currentSimPeriod = simPeriod;
+            if (data.sim_day) currentSimDay = data.sim_day;
             document.getElementById('timeDisplay').textContent =
                 `${simTime}${simPeriod ? ' · ' + simPeriod : ''}`;
             stepCount++;
@@ -947,6 +1080,13 @@
             const container = document.getElementById('eventLog');
 
             for (const event of events) {
+                if (displayedEvents.has(event)) continue;
+                displayedEvents.add(event);
+                if (displayedEvents.size > MAX_DISPLAYED_CACHE) {
+                    const it = displayedEvents.values();
+                    displayedEvents.delete(it.next().value);
+                }
+
                 const div = document.createElement('div');
                 let cls = 'event-item';
                 const llm = forceIsLlm || isLlmEvent(event);
@@ -986,6 +1126,14 @@
             const container = document.getElementById('eventLog');
 
             for (const conv of conversations) {
+                const key = (conv.participants || []).join('&') + '|' + (conv.location || '') + '|' + (conv.content || '');
+                if (displayedConversations.has(key)) continue;
+                displayedConversations.add(key);
+                if (displayedConversations.size > MAX_DISPLAYED_CACHE) {
+                    const it = displayedConversations.values();
+                    displayedConversations.delete(it.next().value);
+                }
+
                 const div = document.createElement('div');
                 div.className = 'event-item conversation llm-call';
                 let stamp = '';
@@ -1003,11 +1151,29 @@
         }
 
         // ─── 控制按钮 ───
+        function updateStepButton() {
+            const btn = document.getElementById('btnStep');
+            if (isStepRunning) {
+                btn.textContent = '⏹ 停止';
+            } else {
+                btn.textContent = '下一个小时';
+            }
+        }
+
+        function updateAutoButton() {
+            const btn = document.getElementById('btnAuto');
+            if (isAutoRunning) {
+                btn.textContent = '⏹ 停止';
+            } else {
+                btn.textContent = '自动运行';
+            }
+        }
+
         function updateDayButton() {
             const btn = document.getElementById('btnDay');
             if (isDayRunning) {
-                btn.textContent = '⏸ 暂停';
-                btn.className = 'btn-day pausing';
+                btn.textContent = '⏹ 停止';
+                btn.className = 'btn-day stopping';
             } else {
                 btn.textContent = '运行一天';
                 btn.className = 'btn-day';
@@ -1066,151 +1232,124 @@
         }
 
         async function doStep() {
-            setButtonsDisabled(true);
-            setStatus('busy', '正在模拟下一个小时...');
-            showPhases(true);
-            setProgressBar(10);
-            startElapsedTimer();
+            if (isStepRunning) {
+                setStatus('busy', '正在停止…');
+                await fetch('/api/pause_day', { method: 'POST' });
+                return;
+            }
             await fetch('/api/clear_pause', { method: 'POST' });
             addSystemLog('开始模拟下一个小时');
-
             try {
-                const res = await fetch('/api/step', { method: 'POST' });
+                const res = await fetch('/api/run_hour', { method: 'POST' });
                 const data = await res.json();
-                if (data.status === 'error') {
-                    setStatus('error', '执行出错: ' + data.message);
-                    addSystemLog('执行出错: ' + data.message);
-                } else {
-                    updateUI(data.state);
-                }
+                if (data.status === 'error') throw new Error(data.message);
+                if (data.status === 'stopped') addSystemLog('模拟已停止');
+                if (data.clock) currentSimDay = data.clock.day;
             } catch (e) {
                 console.error(e);
-                setStatus('error', '执行出错: ' + e.message);
                 addSystemLog('执行出错: ' + e.message);
             }
-
-            stopElapsedTimer();
-            showPhases(false);
-            setButtonsDisabled(false);
         }
 
         async function autoRun() {
-            if (isRunning) {
-                // 发送暂停信号，让后端中断当前 step
-                try {
-                    await fetch('/api/pause_day', { method: 'POST' });
-                } catch (e) {
-                    console.error(e);
-                }
-                isRunning = false;
-                addSystemLog('正在暂停...');
+            if (isAutoRunning) {
+                setStatus('busy', '正在停止…');
+                await fetch('/api/pause_day', { method: 'POST' });
                 return;
             }
-
-            isRunning = true;
-            document.getElementById('btnAuto').textContent = '⏸ 暂停';
-            document.getElementById('btnMicro').disabled = true;
-            document.getElementById('btnStep').disabled = true;
-            document.getElementById('btnDay').disabled = true;
-            document.getElementById('btnReset').disabled = true;
-            startElapsedTimer();
             await fetch('/api/clear_pause', { method: 'POST' });
             addSystemLog('开始自动运行');
-
-            let step = 0;
-            while (isRunning) {
-                step++;
-                setStatus('busy', `自动运行中（第 ${step} 步）...`);
-
-                try {
-                    const res = await fetch('/api/step', { method: 'POST' });
-                    const data = await res.json();
-                    if (data.status === 'paused') {
-                        addSystemLog('自动运行已暂停');
-                        break;
-                    }
-                    if (data.state) updateUI(data.state);
-                    await new Promise(r => setTimeout(r, 500));
-                } catch (e) {
-                    console.error(e);
-                    isRunning = false;
-                    setStatus('error', '自动运行出错: ' + e.message);
-                    addSystemLog('自动运行出错: ' + e.message);
-                }
-            }
-
-            isRunning = false;
-            document.getElementById('btnAuto').textContent = '自动运行';
-            stopElapsedTimer();
-            setButtonsDisabled(false);
+            ws.send(JSON.stringify({ action: 'auto_run', steps: 9999, delay: 1 }));
         }
 
         async function runDay() {
-            // 如果正在运行一天，点击变为暂停
             if (isDayRunning) {
-                try {
-                    await fetch('/api/pause_day', { method: 'POST' });
-                    addSystemLog('正在暂停...');
-                } catch (e) {
-                    console.error(e);
-                }
+                setStatus('busy', '正在停止…');
+                await fetch('/api/pause_day', { method: 'POST' });
                 return;
             }
-
-            isDayRunning = true;
-            updateDayButton();
-            document.getElementById('btnMicro').disabled = true;
-            document.getElementById('btnStep').disabled = true;
-            document.getElementById('btnAuto').disabled = true;
-            document.getElementById('btnReset').disabled = true;
-            setStatus('busy', '正在运行一整天的模拟...');
-            setProgressBar(0, true);
-            startElapsedTimer();
+            await fetch('/api/clear_pause', { method: 'POST' });
             addSystemLog('开始运行一整天');
-
             try {
                 const res = await fetch('/api/run_day', { method: 'POST' });
                 const data = await res.json();
-
-                // 刷新状态
-                const statusRes = await fetch('/api/status');
-                const status = await statusRes.json();
-                renderInitialStatus(status);
-
-                if (data.status === 'paused') {
-                    addSystemLog('一天模拟已暂停');
-                } else {
-                    addSystemLog('一天模拟已完成');
-                }
+                if (data.status === 'stopped') addSystemLog('一天模拟已停止');
+                else if (data.status === 'error') throw new Error(data.message);
+                else addSystemLog('一天模拟已完成');
+                if (data.clock) currentSimDay = data.clock.day;
             } catch (e) {
                 console.error(e);
-                setStatus('error', '运行出错: ' + e.message);
                 addSystemLog('运行一天出错: ' + e.message);
             }
-
-            isDayRunning = false;
-            updateDayButton();
-            stopElapsedTimer();
-            setButtonsDisabled(false);
         }
 
         async function resetSim() {
+            if (!confirm('将重置模拟回到第一天 07:00，所有期间的记忆将被清除。确定继续？')) return;
+
             setButtonsDisabled(true);
-            setStatus('busy', '正在重置...');
-            addSystemLog('开始重置模拟');
+            setStatus('busy', '正在重置到第一天...');
+            addSystemLog('开始重置模拟到第一天');
 
             try {
-                await fetch('/api/reset', { method: 'POST' });
+                const oldTimeStr = currentSimTime;
+                const resp = await fetch('/api/reset', { method: 'POST' });
+                const result = await resp.json();
 
-                document.getElementById('eventLog').innerHTML =
-                    '<div class="event-item system-msg">模拟已重置，点击"下一步"开始</div>';
+                document.getElementById('eventLog').innerHTML = '';
+                if (oldTimeStr && oldTimeStr !== result.clock.time_str) {
+                    addSystemLog(`已清除 ${oldTimeStr} ~ ${result.clock.time_str} 期间的记忆`);
+                }
+                addSystemLog('模拟已重置到第一天，点击"下一步"开始');
+                displayedEvents.clear();
+                displayedConversations.clear();
 
                 const res = await fetch('/api/status');
                 const data = await res.json();
-                renderInitialStatus(data);
+                renderInitialStatus(data, '已重置到第一天');
 
                 stepCount = 0;
-                addSystemLog('重置完成');
+            } catch (e) {
+                setStatus('error', '重置失败: ' + e.message);
+            }
+
+            setButtonsDisabled(false);
+        }
+
+        async function resetDay() {
+            if (!confirm(`将重置到今天 ${currentSimDay} 天 07:00，期间的记忆将被清除。确定继续？`)) return;
+
+            setButtonsDisabled(true);
+            setStatus('busy', '正在重置到今天开始...');
+            addSystemLog('开始重置到今天开始');
+
+            try {
+                const res = await fetch('/api/set_time', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ day: currentSimDay, hour: 7 }),
+                });
+                const result = await res.json();
+                if (result.status !== 'ok') throw new Error(result.message);
+
+                const oldTimeStr = result.old_time || currentSimTime;
+                document.getElementById('timeDisplay').textContent =
+                    `${result.clock.time_str} · ${result.clock.period}`;
+                currentSimTime = result.clock.time_str;
+                currentSimPeriod = result.clock.period;
+
+                setStatus('done', `已重置到${result.clock.time_str}`);
+                setTimeout(() => setStatus('', '就绪'), 1500);
+
+                document.getElementById('eventLog').innerHTML = '';
+                if (oldTimeStr !== result.clock.time_str) {
+                    const [from, to] = oldTimeStr < result.clock.time_str
+                        ? [oldTimeStr, result.clock.time_str]
+                        : [result.clock.time_str, oldTimeStr];
+                    addSystemLog(`已清除 ${from} ~ ${to} 期间的记忆`);
+                }
+                addSystemLog(`已重置到 ${result.clock.time_str}，点击"下一步"继续`);
+                displayedEvents.clear();
+                displayedConversations.clear();
             } catch (e) {
                 setStatus('error', '重置失败: ' + e.message);
             }
@@ -1220,16 +1359,78 @@
 
         function setButtonsDisabled(disabled) {
             document.getElementById('btnMicro').disabled = disabled;
-            document.getElementById('btnStep').disabled = disabled;
             document.getElementById('btnReset').disabled = disabled;
-            // Don't disable Day button when it's in pause mode (isDayRunning)
+            document.getElementById('btnResetDay').disabled = disabled;
+            document.getElementById('btnSetTime').disabled = disabled;
+            // 运行按钮在 running 时强制可点
+            if (!isStepRunning) {
+                document.getElementById('btnStep').disabled = disabled;
+            } else {
+                document.getElementById('btnStep').disabled = false;
+            }
+            if (!isAutoRunning) {
+                document.getElementById('btnAuto').disabled = disabled;
+            } else {
+                document.getElementById('btnAuto').disabled = false;
+            }
             if (!isDayRunning) {
                 document.getElementById('btnDay').disabled = disabled;
+            } else {
+                document.getElementById('btnDay').disabled = false;
             }
-            // Don't disable Auto button when it's in pause mode (isRunning)
-            if (!isRunning) {
-                document.getElementById('btnAuto').disabled = disabled;
+        }
+
+        // ─── 调时间弹窗 ───
+        function openSetTimeModal() {
+            const modal = document.getElementById('setTimeModal');
+            modal.classList.add('active');
+        }
+        function closeSetTimeModal() {
+            document.getElementById('setTimeModal').classList.remove('active');
+        }
+        async function confirmSetTime() {
+            const day = parseInt(document.getElementById('setTimeDay').value, 10);
+            const hour = parseInt(document.getElementById('setTimeHour').value, 10);
+            if (isNaN(day) || day < 1) {
+                alert('天数必须是 ≥1 的整数');
+                return;
             }
+            if (isNaN(hour) || hour < 7 || hour > 22) {
+                alert('小时必须在 7~22 之间');
+                return;
+            }
+            closeSetTimeModal();
+            setButtonsDisabled(true);
+            setStatus('busy', `正在调整时间到第${day}天 ${hour}:00...`);
+            try {
+                const res = await fetch('/api/set_time', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ day, hour }),
+                });
+                const data = await res.json();
+                if (data.status === 'ok') {
+                    addSystemLog(`时间已调至第${day}天 ${hour}:00`);
+                    if (data.clock) {
+                        currentSimTime = data.clock.time_str || '';
+                        currentSimPeriod = data.clock.period || '';
+                        document.getElementById('timeDisplay').textContent =
+                            `${currentSimTime}${currentSimPeriod ? ' · ' + currentSimPeriod : ''}`;
+                    }
+                    // 刷新状态以同步居民和地图
+                    const statusRes = await fetch('/api/status');
+                    const status = await statusRes.json();
+                    renderInitialStatus(status);
+                    setStatus('done', `时间已调至第${day}天 ${hour}:00`);
+                    setTimeout(() => setStatus('', '就绪'), 1500);
+                } else {
+                    setStatus('error', '调时失败: ' + (data.message || '未知错误'));
+                }
+            } catch (e) {
+                console.error(e);
+                setStatus('error', '调时请求失败: ' + e.message);
+            }
+            setButtonsDisabled(false);
         }
 
         // ─── 初始化 ───

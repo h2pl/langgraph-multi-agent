@@ -345,6 +345,8 @@ class TownSimulation:
         logger.info("Starting reflection node")
         """Supervisor 反思节点：一天结束，协调所有居民反思"""
         events = []
+        # 翻页前记录时间戳，确保反思事件显示为当天 22:00
+        reflect_time_str = self.clock.time_str
 
         # 并行执行反思（线程数放宽，真正的限流交给 llm_utils 的信号量）
         max_workers = max(2, len(self.residents))
@@ -352,9 +354,9 @@ class TownSimulation:
             futures = {}
             for name, resident in self.residents.items():
                 if resident.memory.should_reflect(config.REFLECTION_THRESHOLD):
-                    futures[executor.submit(
-                        generate_reflection, resident, self.clock.time_str
-                    )] = (name, resident)
+                futures[executor.submit(
+                    generate_reflection, resident, reflect_time_str
+                )] = (name, resident)
 
             for future in as_completed(futures):
                 name, resident = futures[future]
@@ -362,17 +364,17 @@ class TownSimulation:
                     reflection = future.result()
                     importance = rate_importance(reflection, resident)
                     resident.memory.add_reflection(
-                        reflection, importance, self.clock.time_str
+                        reflection, importance, reflect_time_str
                     )
                     ref_tag = "[反思](已进行RAG检索)" if config.USE_LLM else "[反思]"
                     events.append(_format_event(
-                        self.clock.time_str,
+                        reflect_time_str,
                         f"{ref_tag} {name}: {reflection}（已写入记忆）",
                     ))
                     logger.debug("Reflection by %s: %s", name, reflection)
                 except Exception as e:
                     events.append(_format_event(
-                        self.clock.time_str,
+                        reflect_time_str,
                         f"[错误] {name} 反思失败: {e}",
                     ))
 
@@ -469,9 +471,26 @@ class TownSimulation:
         """获取当前微步进度信息"""
         agent_names = list(self.agents.keys())
         phases = ResidentAgent.PHASES
-        if self._micro_hour_phase == "dispatch" and self._micro_agent_idx < len(agent_names):
-            current_agent = agent_names[self._micro_agent_idx]
-            current_phase = phases[self._micro_phase_idx] if self._micro_phase_idx < len(phases) else "done"
+        # 22:00 这一步的特殊处理：先反思再翻页
+        if self.clock.is_day_end:
+            return {
+                "hour_phase": "reflect",
+                "agent_idx": 0,
+                "agent_count": len(agent_names),
+                "agent_name": None,
+                "phase_idx": 0,
+                "phase_name": "reflect",
+                "sim_time": self.clock.time_str,
+                "sim_period": self.clock.period,
+            }
+        if self._micro_hour_phase == "dispatch":
+            if self._micro_agent_idx < len(agent_names):
+                current_agent = agent_names[self._micro_agent_idx]
+                current_phase = phases[self._micro_phase_idx] if self._micro_phase_idx < len(phases) else "done"
+            else:
+                # 所有居民 dispatch 即将完成，下一步是交互
+                current_agent = None
+                current_phase = "dispatch_finishing"
         else:
             current_agent = None
             current_phase = self._micro_hour_phase
@@ -607,6 +626,38 @@ class TownSimulation:
             "agent_state": None, "location_states": {}, "agent_states": None,
             "micro_info": self.get_micro_info(), "finished_hour": True,
         }
+
+    def set_time(self, day: int, hour: int) -> None:
+        """将模拟时钟调到指定整点（7~22），并重置微步状态"""
+        old_time = self.clock.time_str
+        self.clock.set_time(day, hour)
+        new_time = self.clock.time_str
+        self._reset_micro()
+        # 时钟回拨时，清除"未来"的事件和记忆
+        if new_time != old_time:
+            self._cleanup_after_settime(new_time)
+
+    def _cleanup_after_settime(self, target_time: str) -> None:
+        """清除时钟拨回后的所有事件和记忆（保留 <= target_time 的数据）"""
+        import re
+        def _parse(ts: str):
+            m = re.match(r'第(\d+)天\s+(\d+):00', ts)
+            return (int(m.group(1)), int(m.group(2))) if m else (999999, 0)
+        target = _parse(target_time)
+
+        # 清除小镇事件日志
+        self.town.event_log = [
+            e for e in self.town.event_log
+            if _parse(e.get("time", "")) <= target
+        ]
+
+        # 清除每个居民的记忆
+        for resident in self.residents.values():
+            mem = resident.memory
+            mem.memories = [
+                m for m in mem.memories
+                if _parse(getattr(m, "created_at", "")) <= target
+            ]
 
     def end_day(self) -> dict:
         """Web 单步模式下收尾一天：触发 reflect 并翻页"""
