@@ -85,12 +85,16 @@ class MemoryStream:
         self._init_vector_store()
 
     def _init_vector_store(self) -> None:
-        """初始化 Chroma 向量存储（失败则静默回退）"""
+        """初始化 Chroma 向量存储（失败则回退并记录原因）"""
         try:
             from agents.vector_store import is_available, get_collection
             if is_available() and self.owner_name:
                 self._collection = get_collection(self.owner_name)
-        except Exception:
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(
+                f"向量存储初始化失败 ({self.owner_name}): {type(e).__name__}: {e}"
+            )
             self._collection = None
 
     @property

@@ -182,9 +182,21 @@ def generate_conversation(agent1: Resident, agent2: Resident, context: str) -> s
     if not config.USE_LLM:
         return _random_conversation(agent1, agent2, context)
 
+    # RAG: 双方检索与对方的过往互动，融入当前行为上下文
+    a1_about_a2 = agent1.memory.retrieve(
+        query=f"和{agent2.name}的交往对话 {agent2.name}正在{agent2.current_activity}",
+        top_k=5,
+    )
+    a2_about_a1 = agent2.memory.retrieve(
+        query=f"和{agent1.name}的交往对话 {agent1.name}正在{agent1.current_activity}",
+        top_k=5,
+    )
+    a1_memory_text = agent1.memory.format_memories(a1_about_a2)
+    a2_memory_text = agent2.memory.format_memories(a2_about_a1)
+
     system_prompt = (
-        "你是一个小镇生活模拟器。请根据两个角色的性格和关系，生成一段自然的对话。\n"
-        "对话应该简短（3-5轮），符合角色性格，有生活气息。\n"
+        "你是一个小镇生活模拟器。请根据两个角色的性格、关系和过往记忆，生成一段自然的对话。\n"
+        "对话应该简短（3-5轮），符合角色性格，有生活气息，且体现过往互动的连续性。\n"
         "只输出对话内容，格式为：\n"
         "角色名: 对话内容\n"
     )
@@ -196,10 +208,12 @@ def generate_conversation(agent1: Resident, agent2: Resident, context: str) -> s
         f"场景: {context}\n\n"
         f"角色1: {agent1.name}（{agent1.occupation}，性格: {agent1.personality}）\n"
         f"  当前状态: {agent1.status_summary}\n"
-        f"  对{agent2.name}的看法: {rel_1to2}\n\n"
+        f"  对{agent2.name}的看法: {rel_1to2}\n"
+        f"  关于{agent2.name}的记忆:\n{a1_memory_text}\n\n"
         f"角色2: {agent2.name}（{agent2.occupation}，性格: {agent2.personality}）\n"
         f"  当前状态: {agent2.status_summary}\n"
-        f"  对{agent1.name}的看法: {rel_2to1}\n\n"
+        f"  对{agent1.name}的看法: {rel_2to1}\n"
+        f"  关于{agent1.name}的记忆:\n{a2_memory_text}\n\n"
         f"请生成他们的对话:"
     )
 
@@ -225,13 +239,23 @@ def rate_importance(observation: str, agent: Resident) -> float:
     return 5.0
 
 
-def generate_plan(agent: Resident, time_str: str, period: str, location_options: list[str]) -> dict:
+def generate_plan(agent: Resident, time_str: str, period: str,
+                  location_options: list[str], observation: str = "") -> dict:
     """生成居民的行动计划"""
     if not config.USE_LLM:
         return _random_plan(agent, time_str, period, location_options)
 
-    recent_memories = agent.memory.get_recent_observations(5)
-    memory_text = agent.memory.format_memories(recent_memories)
+    # RAG: 基于当前上下文动态构造检索 query（斯坦福论文：query 即当前处境描述）
+    query_parts = []
+    if observation:
+        query_parts.append(observation[:80])  # 观察是最相关的上下文
+    query_parts.append(f"{period}时间的安排和去处")
+    if agent.current_activity and agent.current_activity != "休息":
+        query_parts.append(f"正在{agent.current_activity}")
+    query = " ".join(query_parts)
+
+    relevant_memories = agent.memory.retrieve(query=query, top_k=8)
+    memory_text = agent.memory.format_memories(relevant_memories)
 
     system_prompt = (
         "你是一个小镇生活模拟器。请根据角色信息，决定这个角色接下来要做什么。\n"
@@ -271,8 +295,16 @@ def generate_reflection(agent: Resident, time_str: str) -> str:
     if not config.USE_LLM:
         return _random_reflection(agent, time_str)
 
-    recent = agent.memory.get_recent_observations(10)
-    memory_text = agent.memory.format_memories(recent)
+    # RAG: 用最近观察构造上下文驱动的检索 query（斯坦福论文：反思基于具体经历）
+    recent_obs = agent.memory.get_recent_observations(3)
+    if recent_obs:
+        obs_keywords = "；".join(m.content[:40] for m in recent_obs)
+        query = f"关于这些经历的感受：{obs_keywords}"
+    else:
+        query = "最近重要的事和印象深刻的经历"
+
+    relevant_memories = agent.memory.retrieve(query=query, top_k=10)
+    memory_text = agent.memory.format_memories(relevant_memories)
 
     system_prompt = (
         "你是一个小镇居民的内心独白生成器。\n"

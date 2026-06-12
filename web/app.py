@@ -553,4 +553,4 @@ async def websocket_endpoint(websocket: WebSocket):
 def start_server():
     """启动 Web 服务器"""
     import uvicorn
-    uvicorn.run(app, host=config.WEB_HOST, port=config.WEB_PORT)
+    uvicorn.run("web.app:app", host=config.WEB_HOST, port=config.WEB_PORT, reload=True)

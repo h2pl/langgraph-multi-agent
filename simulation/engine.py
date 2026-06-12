@@ -298,9 +298,10 @@ class TownSimulation:
                     self.clock.time_str,
                 )
 
+                conv_tag = "[对话](已进行RAG检索)" if config.USE_LLM else "[对话]"
                 event_text = _format_event(
                     self.clock.time_str,
-                    f"[对话] {a1_name}和{a2_name}在{loc_name}聊天",
+                    f"{conv_tag} {a1_name}和{a2_name}在{loc_name}聊天（已写入记忆）",
                 )
                 events.append(event_text)
                 logger.debug("Conversation between %s and %s at %s", a1_name, a2_name, loc_name)
@@ -363,9 +364,10 @@ class TownSimulation:
                     resident.memory.add_reflection(
                         reflection, importance, self.clock.time_str
                     )
+                    ref_tag = "[反思](已进行RAG检索)" if config.USE_LLM else "[反思]"
                     events.append(_format_event(
                         self.clock.time_str,
-                        f"[反思] {name}: {reflection}",
+                        f"{ref_tag} {name}: {reflection}（已写入记忆）",
                     ))
                     logger.debug("Reflection by %s: %s", name, reflection)
                 except Exception as e:

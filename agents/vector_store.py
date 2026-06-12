@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 from pathlib import Path
@@ -115,12 +116,13 @@ def get_collection(name: str) -> Optional[object]:
     if client is None or ef is None:
         return None
 
-    # Chroma collection name 只允许字母数字和下划线
-    safe_name = "".join(c if c.isalnum() else "_" for c in name)
+    # Chroma collection name 只允许 [a-zA-Z0-9._-]，3-512 字符，必须以字母或数字开头结尾
+    # 中文名会转成全下划线导致非法，改用 MD5 哈希确保合法且唯一
+    safe_name = "res_" + hashlib.md5(name.encode("utf-8")).hexdigest()[:12]
     return client.get_or_create_collection(
         name=safe_name,
         embedding_function=ef,
-        metadata={"description": f"{name}的记忆向量库"},
+        metadata={"owner": name, "description": f"{name}的记忆向量库"},
     )
 
 

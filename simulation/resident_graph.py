@@ -14,6 +14,7 @@ from langgraph.graph import StateGraph, END
 from agents.resident import Resident
 from town.environment import Town
 from simulation.interactions import generate_plan, rate_importance
+from config import config
 
 
 # ─── 居民子图状态 ──────────────────────────────────────────────
@@ -147,7 +148,11 @@ class ResidentAgent:
     # ─── 子图节点 ────────────────────────────────────────────
 
     def _perceive(self, state: ResidentState) -> dict:
-        """感知：观察周围环境"""
+        """感知：观察周围环境并记录观察
+
+        斯坦福论文：感知只负责观察记录，不检索记忆。
+        检索只发生在需要决策的步骤（plan / conversation / reflect）。
+        """
         resident = self.resident
         location = resident.current_location
         nearby = self.town.get_nearby_agents(resident.name, location)
@@ -158,14 +163,14 @@ class ResidentAgent:
         else:
             obs = f"在{location}，周围没有其他人。环境: {loc_desc}"
 
-        # 写入记忆
+        # 写入记忆（含重要性评分，与论文一致）
         importance = min(3.0 + len(nearby) * 1.5, 8.0)
         resident.memory.add_observation(obs, importance, state["time_str"])
 
         return {
             "observation": obs,
             "nearby_agents": nearby,
-            "events": [f"[感知] {resident.name}: {obs}"],
+            "events": [f"[感知] {resident.name}: {obs}（已写入记忆）"],
         }
 
     def _plan(self, state: ResidentState) -> dict:
@@ -177,6 +182,7 @@ class ResidentAgent:
             state["time_str"],
             state["period"],
             state["location_options"],
+            observation=state.get("observation", ""),
         )
 
         location = plan.get("location", resident.current_location)
@@ -193,12 +199,13 @@ class ResidentAgent:
         )
         resident.current_plan = f"去{location}{activity}"
 
+        plan_tag = "[计划](已进行RAG检索)" if config.USE_LLM else "[计划]"
         return {
             "planned_location": location,
             "planned_activity": activity,
             "planned_emotion": emotion,
             "events": state["events"] + [
-                f"[计划] {resident.name}: 去{location}{activity}（心情: {emotion}）"
+                f"{plan_tag} {resident.name}: 去{location}{activity}（心情: {emotion}）（已写入记忆）"
             ],
         }
 
